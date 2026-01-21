@@ -195,6 +195,8 @@ SolverHandler::generateGrid(int surfaceOffset)
 		// If it is not regular do a fine mesh close to the surface and
 		// increase the step size when away from the surface
 		if (gridType == "nonuniform") {
+			grid.clear();
+			grid.reserve(2048);
 			// New meaning: gridParam0 is TOTAL LENGTH in nm
 			const double totalLengthNm = gridParam0;
 			// Initialize the value of the previous point
@@ -340,12 +342,12 @@ SolverHandler::generateGrid(int surfaceOffset)
 
 			// Get the number of dimensions
 			if (dimension > 1) {
-				nY = gridParam1;
-				hY = gridParam2;
+				nY = gridParam2;
+				hY = gridParam3;
 			}
 			if (dimension > 2) {
-				nZ = gridParam3;
-				hZ = gridParam4;
+				nZ = gridParam4;
+				hZ = gridParam5;
 			}
 
 			return;
