@@ -234,8 +234,6 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 			}
 
 			// Sigmoid (eqs. 30-31): x = (k + <n>) / maxHePerV(<m>) - 1
-			// hevRatio = 4.0 is the asymptote in Fig. 6.1 of the
-			// Sefta dissertation (Section 6).
 			constexpr double hevRatio = 4.0;
 			double maxHe = static_cast<double>(
 				psi::getMaxHePerV(
@@ -593,9 +591,8 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 						f * sigmo * bC);
 				}
 				// <m>*C_b increases by the I size emitted
-				// (slot 1 = voidAvId; original H-blister wrote to slot 2,
-				//  which appears to be a slot-index bug -- physics calls for
-				//  the V moment to grow when a vacancy is created)
+				// (slot 1 = voidAvId; original H-blister wrote to slot 2
+				//  NOTE: appears to be a slot-index bug 
 				Composition prodComp(
 					this->_clusterData->getCluster(this->_products[1])
 						.getRegion()
