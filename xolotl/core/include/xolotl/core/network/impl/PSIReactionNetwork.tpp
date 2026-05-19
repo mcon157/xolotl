@@ -341,6 +341,18 @@ PSIReactionNetwork<TSpeciesEnum>::updateBurstingConcs(
 			}
 		}
 	}
+
+	// SSBM pin-hole bursting (eqs. 32-33):
+	//   d(<n> C_b)/dt = -<n> * k_burst * C_b
+	if (this->_enableSSBM) {
+		auto clusterDataMirror = this->getClusterDataMirror();
+		auto bId = clusterDataMirror.bubbleId();
+		double He_tot = gridPointSolution[bId + 2];
+		if (He_tot > 0.0) {
+			nBurst[toIndex(Species::He)] += He_tot * factor;
+			gridPointSolution[bId + 2] -= He_tot * factor;
+		}
+	}
 }
 
 template <typename TSpeciesEnum>
@@ -891,24 +903,20 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 			this->addProductionReaction(tag, {i, bubbleId, bubbleId});
 		}
 
-		// H case
-		if constexpr (psi::hasDeuterium<Species>) {
-			if (lo.isOnAxis(Species::D)) {
-				// H_k + B -> B
+		// He case
+		if (lo.isOnAxis(Species::He)) {
+			// He_k + B -> B
 
-				// Only add trap mutation so that at run time it adds the I
-				// concentration if needed.
-				auto& subpaving = this->getSubpaving();
-				Composition comp = Composition::zero();
-				comp[Species::I] = 1;
-				auto iClusterId = subpaving.findTileId(comp);
-				if (iClusterId == NetworkType::invalidIndex()) {
-					this->addProductionReaction(tag, {i, bubbleId, bubbleId});
-				}
-				else {
-					this->addProductionReaction(
-						tag, {i, bubbleId, bubbleId, iClusterId});
-				}
+			auto& subpaving = this->getSubpaving();
+			Composition comp = Composition::zero();
+			comp[Species::I] = 1;
+			auto iClusterId = subpaving.findTileId(comp);
+			if (iClusterId == NetworkType::invalidIndex()) {
+				this->addProductionReaction(tag, {i, bubbleId, bubbleId});
+			}
+			else {
+				this->addProductionReaction(
+					tag, {i, bubbleId, bubbleId, iClusterId});
 			}
 		}
 	}
@@ -926,15 +934,10 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 	Composition hiLargest = largestReg.getUpperLimitPoint();
 	auto largestVSize = hiLargest[Species::V] - 1;
 	auto largestImpSize = hiLargest[Species::He] - 1;
-	// Hydrogen case
-	if constexpr (psi::hasDeuterium<Species>)
-		largestImpSize = hiLargest[Species::D] - 1;
 
-	// H_a + H_bV -> B
-	if constexpr (psi::hasDeuterium<Species>) {
-		if (hi1[Species::D] + hi2[Species::D] - 2 > largestImpSize) {
-			this->addProductionReaction(tag, {i, j, bubbleId});
-		}
+	// He_a + HeV_b -> B
+	if (hi1[Species::He] + hi2[Species::He] - 2 > largestImpSize) {
+		this->addProductionReaction(tag, {i, j, bubbleId});
 	}
 
 	// V_a + HV_b -> B
