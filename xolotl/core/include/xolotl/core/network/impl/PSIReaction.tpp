@@ -82,16 +82,48 @@ KOKKOS_INLINE_FUNCTION
 double
 PSIDissociationReaction<TSpeciesEnum>::getRateForProduction(IndexType gridIndex)
 {
-	auto cl0 = this->_clusterData->getCluster(this->_products[0]);
-	auto cl1 = this->_clusterData->getCluster(this->_products[1]);
+	// Standard case
+	if (not isLargeBubbleReaction) {
+		auto cl0 = this->_clusterData->getCluster(this->_products[0]);
+		auto cl1 = this->_clusterData->getCluster(this->_products[1]);
 
-	double r0 = cl0.getReactionRadius();
-	double r1 = cl1.getReactionRadius();
+		double r0 = cl0.getReactionRadius();
+		double r1 = cl1.getReactionRadius();
 
-	double dc0 = cl0.getDiffusionCoefficient(gridIndex);
-	double dc1 = cl1.getDiffusionCoefficient(gridIndex);
+		double dc0 = cl0.getDiffusionCoefficient(gridIndex);
+		double dc1 = cl1.getDiffusionCoefficient(gridIndex);
 
-	return psi::getRate(cl0.getRegion(), cl1.getRegion(), r0, r1, dc0, dc1);
+		return psi::getRate(cl0.getRegion(), cl1.getRegion(), r0, r1, dc0, dc1);
+	}
+
+	// SSBM reaction
+	const auto dummyRegion = Region(Composition{});
+
+	double r0 = 0.0, r1 = 0.0, dc0 = 0.0, dc1 = 0.0;
+	Region cl0Reg = dummyRegion, cl1Reg = dummyRegion;
+	auto numClusters = this->_clusterData->numClusters;
+
+	if (this->_products[0] >= numClusters) {
+		r0 = this->_clusterData->bubbleAvRad();
+	}
+	else {
+		auto cl0 = this->_clusterData->getCluster(this->_products[0]);
+		r0 = cl0.getReactionRadius();
+		dc0 = cl0.getDiffusionCoefficient(gridIndex);
+		cl0Reg = cl0.getRegion();
+	}
+
+	if (this->_products[1] >= numClusters) {
+		r1 = this->_clusterData->bubbleAvRad();
+	}
+	else {
+		auto cl1 = this->_clusterData->getCluster(this->_products[1]);
+		r1 = cl1.getReactionRadius();
+		dc1 = cl1.getDiffusionCoefficient(gridIndex);
+		cl1Reg = cl1.getRegion();
+	}
+
+	return psi::getRate(cl0Reg, cl1Reg, r0, r1, dc0, dc1);
 }
 
 template <typename TSpeciesEnum>
@@ -158,112 +190,146 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 			Kokkos::atomic_sub(&fluxes[stdClusterId], f);
 
 			// The V size increases (kind of cheating on the ID)
-			Kokkos::atomic_add(&fluxes[ssbmId + 1], f * comp[Species::V]);
+			Kokkos::atomic_add(&fluxes[ssbmId + 2], f * comp[Species::V]);
 		}
 
 		// Interstitial case
 		if (comp[Species::I] > 0) {
-			// Special factor to deal with the threshold size
-			double gauss = 1.0;
-
-			// Special case where the product is not the single size
-			if (this->_products[0] < numClusters) {
-				// I_a + B -> HV_b
-				// Only if the large void has a specific size
-				auto avVoid =
-					concentrations(ssbmId + 1) / concentrations(ssbmId);
-				if (concentrations(ssbmId) == 0.0)
-					avVoid = 0.0;
-
-				// Get the product composition
-				auto pr = this->_clusterData->getCluster(this->_products[0]);
-				auto prReg = pr.getRegion();
-				Composition prComp(prReg.getOrigin());
-
-				// Target value for the reaction to happen
-				double target = prComp[Species::V] + comp[Species::I];
-
-				// Gaussian function around it
-				double twoSigmaTwo = 0.1;
-				gauss =
-					exp(-(avVoid - target) * (avVoid - target) / twoSigmaTwo) /
-					sqrt(::xolotl::core::pi * twoSigmaTwo);
-
-				// The large bubble concentration decreases
-				Kokkos::atomic_sub(&fluxes[ssbmId], f * gauss);
-				// The product concentration increases
-				Kokkos::atomic_add(&fluxes[this->_products[0]], f * gauss);
-
-				// The V size decreases by the V content of the emitted HeV
-				Kokkos::atomic_sub(
-					&fluxes[ssbmId + 1], f * prComp[Species::V] * gauss);
-				// <n>*C_b also loses the He content of the emitted HeV
-				// (eq. 10)
-				Kokkos::atomic_sub(
-					&fluxes[ssbmId + 2], f * prComp[Species::He] * gauss);
+			// I_k + B -> B
+			// The reaction can happen only if the average V is larger than the
+			// threshold and if the H/V ratio is realistic
+			auto avV = concentrations(ssbmId + 2) / concentrations(ssbmId);
+			auto avH = concentrations(ssbmId + 1) / concentrations(ssbmId);
+			if (concentrations(ssbmId) == 0.0) {
+				avV = 0.0;
+				avH = 0.0;
 			}
 
-			// In every case
+			// Get the largest cluster
+			double largestVSize = this->_clusterData->maxVSize();
+
+			// Threshold contribution
+			double sigmo = computeSigmoid(avV, largestVSize, 2.0);
+
+			// H/V contribution
+			double maxH = psi::getMaxHPerV(util::max(avV - 1.0, 1.0),
+				this->_clusterData->latticeParameter(),
+				cl.getTemperature(gridIndex));
+			sigmo *= 1.0 - computeSigmoid(avH, maxH, 2.0);
 
 			// The standard cluster always loses the flux
-			Kokkos::atomic_sub(&fluxes[stdClusterId], f * gauss);
+			Kokkos::atomic_sub(&fluxes[stdClusterId], f * sigmo);
 
-			// I_k + B -> B
 			// The V size decreases
 			Kokkos::atomic_sub(
-				&fluxes[ssbmId + 1], f * comp[Species::I] * gauss);
+				&fluxes[ssbmId + 2], f * comp[Species::I] * sigmo);
 		}
 
+		// H case
+		// H_k + B -> B
+		if constexpr (psi::hasDeuterium<Species>) {
+			if (comp[Species::D] > 0) {
+				// The standard cluster always loses the flux
+				Kokkos::atomic_sub(&fluxes[stdClusterId], f);
+
+				// The average H increases
+				Kokkos::atomic_add(&fluxes[ssbmId + 1], f * comp[Species::D]);
+
+				// Trap mutation case
+				// Compute the average concentrations
+				auto conc = concentrations(ssbmId);
+				auto avV = concentrations(ssbmId + 2) / conc;
+				auto avH = concentrations(ssbmId + 1) / conc;
+				if (conc == 0.0) {
+					avV = 0.0;
+					avH = 0.0;
+				}
+
+				// Sigmoid
+				double maxH = psi::getMaxHPerV(avV,
+					this->_clusterData->latticeParameter(),
+					cl.getTemperature(gridIndex));
+				double sigmo =
+					computeSigmoid(comp[Species::D] + avH, maxH, 2.0);
+				if (maxH == 0.0)
+					sigmo = 1.0;
+
+				// The other product increases
+				if (this->_products[1] != Superclass::invalidIndex) {
+					Kokkos::atomic_add(&fluxes[this->_products[1]], f * sigmo);
+
+					// The average V increases
+					Composition prodComp(
+						this->_clusterData->getCluster(this->_products[1])
+							.getRegion()
+							.getOrigin());
+					Kokkos::atomic_add(
+						&fluxes[ssbmId + 2], f * prodComp[Species::I] * sigmo);
+				}
+				else {
+					// I is not explicitely modeled
+					Kokkos::atomic_add(&fluxes[ssbmId + 2], f * sigmo);
+				}
+			}
+		}
+
+		// ===================================================================
+		// >>> HE-SSBM CHANGE (1): He absorption in Case A (flux).
+		// Parallel to the H block above, retargeted to Species::He.
+		// Uses getMaxHePerV with hevRatio=4.0 (asymptote from Fig. 6.1 of
+		// the Sefta dissertation) instead of getMaxHPerV (which is for H).
+		// DOF layout per upstream comment on line ~345: slot +1 = <He>,
+		// slot +2 = <V>.
+		// ===================================================================
 		// He case
-		// He_k + B -> B  (and He_k + B -> B + I_l for trap mutation)
+		// He_k + B -> B  (with optional trap-mutation product I_l)
 		if (comp[Species::He] > 0) {
 			// The standard cluster always loses the flux
 			Kokkos::atomic_sub(&fluxes[stdClusterId], f);
 
-			// The average He (slot +2) increases
-			Kokkos::atomic_add(&fluxes[ssbmId + 2], f * comp[Species::He]);
+			// The average He increases (slot +1 = hAvId, reused for He)
+			Kokkos::atomic_add(&fluxes[ssbmId + 1], f * comp[Species::He]);
 
 			// Trap mutation case
 			// Compute the average concentrations
 			auto conc = concentrations(ssbmId);
-			auto avV = concentrations(ssbmId + 1) / conc;
-			auto avHe = concentrations(ssbmId + 2) / conc;
+			auto avV = concentrations(ssbmId + 2) / conc;
+			auto avHe = concentrations(ssbmId + 1) / conc;
 			if (conc == 0.0) {
 				avV = 0.0;
 				avHe = 0.0;
 			}
 
-			// Sigmoid (eqs. 30-31): x = (k + <n>) / maxHePerV(<m>) - 1
+			// Sigmoid (eqs. 30-31 of equations.pdf)
 			constexpr double hevRatio = 4.0;
 			double maxHe = static_cast<double>(
 				psi::getMaxHePerV(
 					static_cast<typename NetworkType::AmountType>(
 						util::max(0.0, avV)),
 					hevRatio));
-			if (maxHe < 1.0) maxHe = 1.0;
-			double x =
-				((static_cast<double>(comp[Species::He]) + avHe) / maxHe) -
-				1.0;
-			double sigmo = 1.0 / (1.0 + std::exp(-50.0 * x));
-			double nI = 1.0;
+			double sigmo =
+				computeSigmoid(comp[Species::He] + avHe, maxHe, 2.0);
+			if (maxHe == 0.0)
+				sigmo = 1.0;
 
 			// The other product (I_l) increases
 			if (this->_products[1] != Superclass::invalidIndex) {
-				Kokkos::atomic_add(
-					&fluxes[this->_products[1]], nI * f * sigmo);
+				Kokkos::atomic_add(&fluxes[this->_products[1]], f * sigmo);
 
-				// The average V (slot +1) increases by the I size emitted
+				// The average V increases (slot +2 = voidAvId)
 				Composition prodComp(
 					this->_clusterData->getCluster(this->_products[1])
 						.getRegion()
 						.getOrigin());
-				Kokkos::atomic_add(&fluxes[ssbmId + 1],
-					nI * f * prodComp[Species::I] * sigmo);
+				Kokkos::atomic_add(
+					&fluxes[ssbmId + 2], f * prodComp[Species::I] * sigmo);
 			}
 			else {
-				Kokkos::atomic_add(&fluxes[ssbmId + 1], nI * f * sigmo);
+				// I is not explicitly modeled
+				Kokkos::atomic_add(&fluxes[ssbmId + 2], f * sigmo);
 			}
 		}
+		// <<< end HE-SSBM CHANGE (1)
 	}
 
 	// Large bubble is one of the product
@@ -282,22 +348,52 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 		double f = this->_coefs(0, 0, 0, 0) * cR1 * cR2 * rate;
 
 		// Vacancy case
-		// V_a + HeV_b -> B  (eqs. 15-18)
+		// V_a + HV_b -> B
 		if (orig1.isOnAxis(Species::V) or orig2.isOnAxis(Species::V)) {
 			// Compute the total size
 			auto totalSize = comp1[Species::V] + comp2[Species::V];
-			auto totalHeSize = comp1[Species::He] + comp2[Species::He];
 			// Both reactants decrease
 			Kokkos::atomic_sub(&fluxes[this->_reactants[0]], f);
 			Kokkos::atomic_sub(&fluxes[this->_reactants[1]], f);
-			// The large bubble increases, as well as average V and He
+			// The large bubble increases, as well as average V and H
 			Kokkos::atomic_add(&fluxes[this->_products[0]], f);
-			Kokkos::atomic_add(&fluxes[this->_products[0] + 1], f * totalSize);
-			// <n>*C_b gains the He content of the incoming HeV (eq. 17)
+			Kokkos::atomic_add(&fluxes[this->_products[0] + 2], f * totalSize);
+			if constexpr (psi::hasDeuterium<Species>) {
+				totalSize = comp1[Species::D] + comp2[Species::D];
+				Kokkos::atomic_add(
+					&fluxes[this->_products[0] + 1], f * totalSize);
+			}
+			// >>> HE-SSBM CHANGE (2a): when V + HeV_b -> B, also grow
+			// <He>*C_b by the He content of the HeV (eq. 17).
+			totalSize = comp1[Species::He] + comp2[Species::He];
 			Kokkos::atomic_add(
-				&fluxes[this->_products[0] + 2], f * totalHeSize);
+				&fluxes[this->_products[0] + 1], f * totalSize);
+			// <<< end HE-SSBM CHANGE (2a)
 		}
 
+		// H case
+		// H_a + H_bV -> B
+		if constexpr (psi::hasDeuterium<Species>) {
+			if (orig1.isOnAxis(Species::D) or orig2.isOnAxis(Species::D)) {
+				// Compute the total size
+				auto totalDSize = comp1[Species::D] + comp2[Species::D];
+				auto totalVSize = comp1[Species::V] + comp2[Species::V];
+				// Both reactants decrease
+				Kokkos::atomic_sub(&fluxes[this->_reactants[0]], f);
+				Kokkos::atomic_sub(&fluxes[this->_reactants[1]], f);
+				// The large bubble increases, as well as average H and V
+				Kokkos::atomic_add(&fluxes[this->_products[0]], f);
+				Kokkos::atomic_add(
+					&fluxes[this->_products[0] + 1], f * totalDSize);
+				Kokkos::atomic_add(
+					&fluxes[this->_products[0] + 2], f * totalVSize);
+			}
+		}
+
+		// ===================================================================
+		// >>> HE-SSBM CHANGE (2): He absorption in Case B (flux).
+		// Parallel to the H block above, retargeted to Species::He.
+		// ===================================================================
 		// He case
 		// He_a + He_bV -> B  (eqs. 1-4)
 		if (orig1.isOnAxis(Species::He) or orig2.isOnAxis(Species::He)) {
@@ -310,10 +406,11 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 			// The large bubble increases, as well as average He and V
 			Kokkos::atomic_add(&fluxes[this->_products[0]], f);
 			Kokkos::atomic_add(
-				&fluxes[this->_products[0] + 2], f * totalHeSize);
+				&fluxes[this->_products[0] + 1], f * totalHeSize);
 			Kokkos::atomic_add(
-				&fluxes[this->_products[0] + 1], f * totalVSize);
+				&fluxes[this->_products[0] + 2], f * totalVSize);
 		}
+		// <<< end HE-SSBM CHANGE (2)
 	}
 }
 
@@ -330,6 +427,8 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 			concentrations, values, gridIndex);
 	}
 
+	// The _connEntries for large bubbles are ordered in the same way as the
+	// moments He H V
 	// The rate need to be computed each time because it depends on the current
 	// large bubble size
 	auto rate = getRateForProduction(gridIndex);
@@ -361,6 +460,7 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 
 		// Vacancy case
 		if (comp[Species::V] > 0) {
+			// V_k + B -> B
 			// The standard cluster always loses the flux
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_sub(
@@ -379,112 +479,43 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 			f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::V];
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][1][0][0]), f * stdC);
+					&values(this->_connEntries[0][3][0][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][1][1][0]), f * bC);
+					&values(this->_connEntries[0][3][1][0]), f * bC);
 			}
 			else {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][1][1][0]), f * stdC);
+					&values(this->_connEntries[1][3][1][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][1][0][0]), f * bC);
+					&values(this->_connEntries[1][3][0][0]), f * bC);
 			}
 		}
 		// Interstitial case
 		if (comp[Species::I] > 0) {
-			// Special factor to deal with the threshold size
-			double gauss = 1.0;
-
-			// Special case where the product is not the single size
-			if (this->_products[0] < numClusters) {
-				// Only if the large void has a specific size
-				auto avVoid =
-					concentrations(ssbmId + 1) / concentrations(ssbmId);
-				if (concentrations(ssbmId) == 0.0)
-					avVoid = 0.0;
-
-				// Get the product composition
-				auto pr = this->_clusterData->getCluster(this->_products[0]);
-				auto prReg = pr.getRegion();
-				Composition prComp(prReg.getOrigin());
-
-				// Target value for the reaction to happen
-				double target = prComp[Species::V] + comp[Species::I];
-
-				// Gaussian function around it
-				double twoSigmaTwo = 0.1;
-				double gauss =
-					exp(-(avVoid - target) * (avVoid - target) / twoSigmaTwo) /
-					sqrt(::xolotl::core::pi * twoSigmaTwo);
-
-				// Update the rate
-				f = this->_coefs(0, 0, 0, 0) * rate * gauss;
-
-				// The large bubble concentration decreases
-				if (this->_reactants[0] >= numClusters) {
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[0][0][0][0]), f * stdC);
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[0][0][1][0]), f * bC);
-				}
-				else {
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[1][0][1][0]), f * stdC);
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[1][0][0][0]), f * bC);
-				}
-				// The product concentration increases
-				if (this->_reactants[0] >= numClusters) {
-					Kokkos::atomic_add(
-						&values(this->_connEntries[2][0][0][0]), f * stdC);
-					Kokkos::atomic_add(
-						&values(this->_connEntries[2][0][1][0]), f * bC);
-				}
-				else {
-					Kokkos::atomic_add(
-						&values(this->_connEntries[2][0][1][0]), f * stdC);
-					Kokkos::atomic_add(
-						&values(this->_connEntries[2][0][0][0]), f * bC);
-				}
-
-				// The V size decreases by the V content of the emitted HeV
-				f = this->_coefs(0, 0, 0, 0) * rate * prComp[Species::V] *
-					gauss;
-				if (this->_reactants[0] >= numClusters) {
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[0][1][0][0]), f * stdC);
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[0][1][1][0]), f * bC);
-				}
-				else {
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[1][1][1][0]), f * stdC);
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[1][1][0][0]), f * bC);
-				}
-
-				// <n>*C_b also loses the He content of the emitted HeV
-				// (eq. 10)
-				f = this->_coefs(0, 0, 0, 0) * rate * prComp[Species::He] *
-					gauss;
-				if (this->_reactants[0] >= numClusters) {
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[0][2][0][0]), f * stdC);
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[0][2][1][0]), f * bC);
-				}
-				else {
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[1][2][1][0]), f * stdC);
-					Kokkos::atomic_sub(
-						&values(this->_connEntries[1][2][0][0]), f * bC);
-				}
+			// I_k + B -> B
+			// The reaction can happen only if the average V is larger than the
+			// threshold and if the H/V ratio is realistic
+			auto avV = concentrations(ssbmId + 2) / concentrations(ssbmId);
+			auto avH = concentrations(ssbmId + 1) / concentrations(ssbmId);
+			if (concentrations(ssbmId) == 0.0) {
+				avV = 0.0;
+				avH = 0.0;
 			}
 
-			// In every case
+			// Get the largest cluster
+			double largestVSize = this->_clusterData->maxVSize();
+
+			// Threshold contribution
+			double sigmo = computeSigmoid(avV, largestVSize, 2.0);
+
+			// H/V contribution
+			double maxH = psi::getMaxHPerV(util::max(avV - 1.0, 1.0),
+				this->_clusterData->latticeParameter(),
+				cl.getTemperature(gridIndex));
+			sigmo *= 1.0 - computeSigmoid(avH, maxH, 2.0);
 
 			// The standard cluster always loses the flux
-			f = this->_coefs(0, 0, 0, 0) * rate * gauss;
+			f = this->_coefs(0, 0, 0, 0) * rate * sigmo;
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_sub(
 					&values(this->_connEntries[1][0][0][0]), f * stdC);
@@ -499,25 +530,141 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 			}
 
 			// The V size decreases
-			f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::I] * gauss;
+			f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::I] * sigmo;
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[0][1][0][0]), f * stdC);
+					&values(this->_connEntries[0][3][0][0]), f * stdC);
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[0][1][1][0]), f * bC);
+					&values(this->_connEntries[0][3][1][0]), f * bC);
 			}
 			else {
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[1][1][1][0]), f * stdC);
+					&values(this->_connEntries[1][3][1][0]), f * stdC);
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[1][1][0][0]), f * bC);
+					&values(this->_connEntries[1][3][0][0]), f * bC);
 			}
 		}
 
+		// H case
+		if constexpr (psi::hasDeuterium<Species>) {
+			if (comp[Species::D] > 0) {
+				// H_k + B -> B
+
+				// The standard cluster always loses the flux
+				if (this->_reactants[0] >= numClusters) {
+					Kokkos::atomic_sub(
+						&values(this->_connEntries[1][0][0][0]), f * stdC);
+					Kokkos::atomic_sub(
+						&values(this->_connEntries[1][0][1][0]), f * bC);
+				}
+				else {
+					Kokkos::atomic_sub(
+						&values(this->_connEntries[0][0][1][0]), f * stdC);
+					Kokkos::atomic_sub(
+						&values(this->_connEntries[0][0][0][0]), f * bC);
+				}
+
+				// The H size increases
+				f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::D];
+				if (this->_reactants[0] >= numClusters) {
+					Kokkos::atomic_add(
+						&values(this->_connEntries[0][2][0][0]), f * stdC);
+					Kokkos::atomic_add(
+						&values(this->_connEntries[0][2][1][0]), f * bC);
+				}
+				else {
+					Kokkos::atomic_add(
+						&values(this->_connEntries[1][2][1][0]), f * stdC);
+					Kokkos::atomic_add(
+						&values(this->_connEntries[1][2][0][0]), f * bC);
+				}
+
+				// Compute the average concentrations
+				auto conc = concentrations(ssbmId);
+				auto avV = concentrations(ssbmId + 2) / conc;
+				auto avH = concentrations(ssbmId + 1) / conc;
+				if (conc == 0.0) {
+					avV = 0.0;
+					avH = 0.0;
+				}
+
+				// Sigmoid for trap mutation
+				// H_k + B -> B + I
+				double maxH = psi::getMaxHPerV(avV,
+					this->_clusterData->latticeParameter(),
+					cl.getTemperature(gridIndex));
+				double sigmo =
+					computeSigmoid(comp[Species::D] + avH, maxH, 2.0);
+				if (maxH == 0.0)
+					sigmo = 1.0;
+
+				// The other product increases
+				f = this->_coefs(0, 0, 0, 0) * rate * sigmo;
+				if (this->_products[1] != Superclass::invalidIndex) {
+					if (this->_reactants[0] >= numClusters) {
+						Kokkos::atomic_add(
+							&values(this->_connEntries[3][0][0][0]), f * stdC);
+						Kokkos::atomic_add(
+							&values(this->_connEntries[3][0][1][0]), f * bC);
+					}
+					else {
+						Kokkos::atomic_add(
+							&values(this->_connEntries[3][0][1][0]), f * stdC);
+						Kokkos::atomic_add(
+							&values(this->_connEntries[3][0][0][0]), f * bC);
+					}
+					// The average V increases
+					Composition prodComp(
+						this->_clusterData->getCluster(this->_products[1])
+							.getRegion()
+							.getOrigin());
+					f = this->_coefs(0, 0, 0, 0) * rate * prodComp[Species::I] *
+						sigmo;
+					if (this->_reactants[0] >= numClusters) {
+						Kokkos::atomic_add(
+							&values(this->_connEntries[0][3][0][0]), f * stdC);
+						Kokkos::atomic_add(
+							&values(this->_connEntries[0][3][1][0]), f * bC);
+					}
+					else {
+						Kokkos::atomic_add(
+							&values(this->_connEntries[1][3][1][0]), f * stdC);
+						Kokkos::atomic_add(
+							&values(this->_connEntries[1][3][0][0]), f * bC);
+					}
+				}
+				else {
+					// The average V increases but I is not explicitly modeled
+					// here
+					f = this->_coefs(0, 0, 0, 0) * rate * sigmo;
+					if (this->_reactants[0] >= numClusters) {
+						Kokkos::atomic_add(
+							&values(this->_connEntries[0][3][0][0]), f * stdC);
+						Kokkos::atomic_add(
+							&values(this->_connEntries[0][3][1][0]), f * bC);
+					}
+					else {
+						Kokkos::atomic_add(
+							&values(this->_connEntries[1][3][1][0]), f * stdC);
+						Kokkos::atomic_add(
+							&values(this->_connEntries[1][3][0][0]), f * bC);
+					}
+				}
+			}
+		}
+
+		// ===================================================================
+		// >>> HE-SSBM CHANGE (3): He absorption in Case A (partials).
+		// Parallel to the H block above, retargeted to Species::He.
+		// connEntries slot mapping (per upstream comment at line ~345):
+		//   [*][0] = C_b row
+		//   [*][1] = <He> moment row     <-- this is where we write He grows
+		//   [*][2] = <H>  moment row     (skipped in our He-only branch)
+		//   [*][3] = <V>  moment row     <-- this is where we write V grows
+		// ===================================================================
 		// He case
-		// He_k + B -> B  (and -> B + I_l for trap mutation)
 		if (comp[Species::He] > 0) {
-			// It should always be a bubble here
+			// He_k + B -> B
 
 			// The standard cluster always loses the flux
 			if (this->_reactants[0] >= numClusters) {
@@ -533,110 +680,95 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 					&values(this->_connEntries[0][0][0][0]), f * bC);
 			}
 
-			// The He size (<n>*C_b, slot 2 = hAvId reused for He) increases
+			// The He size increases (slot [1] = <He> moment row)
 			f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::He];
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][2][0][0]), f * stdC);
+					&values(this->_connEntries[0][1][0][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][2][1][0]), f * bC);
+					&values(this->_connEntries[0][1][1][0]), f * bC);
 			}
 			else {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][2][1][0]), f * stdC);
+					&values(this->_connEntries[1][1][1][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][2][0][0]), f * bC);
+					&values(this->_connEntries[1][1][0][0]), f * bC);
 			}
 
 			// Compute the average concentrations
 			auto conc = concentrations(ssbmId);
-			auto avV = concentrations(ssbmId + 1) / conc;
-			auto avHe = concentrations(ssbmId + 2) / conc;
+			auto avV = concentrations(ssbmId + 2) / conc;
+			auto avHe = concentrations(ssbmId + 1) / conc;
 			if (conc == 0.0) {
 				avV = 0.0;
 				avHe = 0.0;
 			}
 
-			// Sigmoid (eqs. 30-31)
+			// Sigmoid for trap mutation (eqs. 30-31)
 			constexpr double hevRatio = 4.0;
 			double maxHe = static_cast<double>(
 				psi::getMaxHePerV(
 					static_cast<typename NetworkType::AmountType>(
 						util::max(0.0, avV)),
 					hevRatio));
-			if (maxHe < 1.0) maxHe = 1.0;
-			double x =
-				((static_cast<double>(comp[Species::He]) + avHe) / maxHe) -
-				1.0;
-			double sigmo = 1.0 / (1.0 + std::exp(-50.0 * x));
-			double nI = 1.0;
+			double sigmo =
+				computeSigmoid(comp[Species::He] + avHe, maxHe, 2.0);
+			if (maxHe == 0.0)
+				sigmo = 1.0;
 
 			// The I_l product increases
-			f = this->_coefs(0, 0, 0, 0) * rate * nI;
+			f = this->_coefs(0, 0, 0, 0) * rate * sigmo;
 			if (this->_products[1] != Superclass::invalidIndex) {
 				if (this->_reactants[0] >= numClusters) {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[3][0][0][0]),
-						f * sigmo * stdC);
+						&values(this->_connEntries[3][0][0][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[3][0][1][0]),
-						f * sigmo * bC);
+						&values(this->_connEntries[3][0][1][0]), f * bC);
 				}
 				else {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[3][0][1][0]),
-						f * sigmo * stdC);
+						&values(this->_connEntries[3][0][1][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[3][0][0][0]),
-						f * sigmo * bC);
+						&values(this->_connEntries[3][0][0][0]), f * bC);
 				}
-				// <m>*C_b increases by the I size emitted
-				// (slot 1 = voidAvId; original H-blister wrote to slot 2
-				//  NOTE: appears to be a slot-index bug 
+				// The average V increases (slot [3] = <V> moment row)
 				Composition prodComp(
 					this->_clusterData->getCluster(this->_products[1])
 						.getRegion()
 						.getOrigin());
-				f = this->_coefs(0, 0, 0, 0) * rate * nI *
-					prodComp[Species::I];
+				f = this->_coefs(0, 0, 0, 0) * rate *
+					prodComp[Species::I] * sigmo;
 				if (this->_reactants[0] >= numClusters) {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][1][0][0]),
-						f * sigmo * stdC);
+						&values(this->_connEntries[0][3][0][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][1][1][0]),
-						f * sigmo * bC);
+						&values(this->_connEntries[0][3][1][0]), f * bC);
 				}
 				else {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][1][1][0]),
-						f * sigmo * stdC);
+						&values(this->_connEntries[1][3][1][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][1][0][0]),
-						f * sigmo * bC);
+						&values(this->_connEntries[1][3][0][0]), f * bC);
 				}
 			}
 			else {
-				// No I product, but <m>*C_b still grows by 1
-				f = this->_coefs(0, 0, 0, 0) * rate * nI;
+				// The average V increases but I is not explicitly modeled
+				f = this->_coefs(0, 0, 0, 0) * rate * sigmo;
 				if (this->_reactants[0] >= numClusters) {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][1][0][0]),
-						f * sigmo * stdC);
+						&values(this->_connEntries[0][3][0][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][1][1][0]),
-						f * sigmo * bC);
+						&values(this->_connEntries[0][3][1][0]), f * bC);
 				}
 				else {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][1][1][0]),
-						f * sigmo * stdC);
+						&values(this->_connEntries[1][3][1][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][1][0][0]),
-						f * sigmo * bC);
+						&values(this->_connEntries[1][3][0][0]), f * bC);
 				}
 			}
 		}
+		// <<< end HE-SSBM CHANGE (3)
 	}
 
 	// Large bubble is one of the product
@@ -655,7 +787,7 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 		double f = this->_coefs(0, 0, 0, 0) * rate;
 
 		// Vacancy case
-		// V_a + HeV_b -> B  (eqs. 15-18)
+		// V_a + H_bV -> B
 		if (orig1.isOnAxis(Species::V) or orig2.isOnAxis(Species::V)) {
 			// Both reactants decrease
 			Kokkos::atomic_sub(
@@ -667,28 +799,78 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 			Kokkos::atomic_sub(
 				&values(this->_connEntries[1][0][1][0]), f * cR1);
 
-			// The large bubble increases, as well as average V
+			// The large bubble increases, as well as average H and V
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][0][0][0]), f * cR2);
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][0][1][0]), f * cR1);
+			if constexpr (psi::hasDeuterium<Species>) {
+				f = this->_coefs(0, 0, 0, 0) * rate *
+					(comp1[Species::D] + comp2[Species::D]);
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][2][0][0]), f * cR2);
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][2][1][0]), f * cR1);
+			}
+			// >>> HE-SSBM CHANGE (4a): when V + HeV_b -> B, also grow
+			// <He>*C_b by the He content of the HeV (eq. 17).
 			f = this->_coefs(0, 0, 0, 0) * rate *
-				(comp1[Species::V] + comp2[Species::V]);
+				(comp1[Species::He] + comp2[Species::He]);
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][1][0][0]), f * cR2);
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][1][1][0]), f * cR1);
-			// <n>*C_b also increases by total He size (eq. 17)
+			// <<< end HE-SSBM CHANGE (4a)
 			f = this->_coefs(0, 0, 0, 0) * rate *
-				(comp1[Species::He] + comp2[Species::He]);
+				(comp1[Species::V] + comp2[Species::V]);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][2][0][0]), f * cR2);
+				&values(this->_connEntries[2][3][0][0]), f * cR2);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][2][1][0]), f * cR1);
+				&values(this->_connEntries[2][3][1][0]), f * cR1);
 		}
 
+		// H case
+		// H_a + H_bV -> B
+		if constexpr (psi::hasDeuterium<Species>) {
+			if (orig1.isOnAxis(Species::D) or orig2.isOnAxis(Species::D)) {
+				// Both reactants decrease
+				Kokkos::atomic_sub(
+					&values(this->_connEntries[0][0][0][0]), f * cR2);
+				Kokkos::atomic_sub(
+					&values(this->_connEntries[1][0][0][0]), f * cR2);
+				Kokkos::atomic_sub(
+					&values(this->_connEntries[0][0][1][0]), f * cR1);
+				Kokkos::atomic_sub(
+					&values(this->_connEntries[1][0][1][0]), f * cR1);
+
+				// The large bubble increases, as well as average H and V
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][0][0][0]), f * cR2);
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][0][1][0]), f * cR1);
+				f = this->_coefs(0, 0, 0, 0) * rate *
+					(comp1[Species::D] + comp2[Species::D]);
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][2][0][0]), f * cR2);
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][2][1][0]), f * cR1);
+				f = this->_coefs(0, 0, 0, 0) * rate *
+					(comp1[Species::V] + comp2[Species::V]);
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][3][0][0]), f * cR2);
+				Kokkos::atomic_add(
+					&values(this->_connEntries[2][3][1][0]), f * cR1);
+			}
+		}
+
+		// ===================================================================
+		// >>> HE-SSBM CHANGE (4b): He absorption in Case B (partials).
+		// Parallel to the H block above, retargeted to Species::He.
+		// He growth -> slot [2][1] (He moment).
+		// V growth  -> slot [2][3] (V moment).
+		// ===================================================================
 		// He case
-		// He_a + He_bV -> B  (eqs. 1-4)
+		// He_a + He_bV -> B
 		if (orig1.isOnAxis(Species::He) or orig2.isOnAxis(Species::He)) {
 			// Both reactants decrease
 			Kokkos::atomic_sub(
@@ -705,20 +887,177 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 				&values(this->_connEntries[2][0][0][0]), f * cR2);
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][0][1][0]), f * cR1);
-			// <n>*C_b += total He
+			// <He>*C_b += total He   (slot [2][1])
 			f = this->_coefs(0, 0, 0, 0) * rate *
 				(comp1[Species::He] + comp2[Species::He]);
-			Kokkos::atomic_add(
-				&values(this->_connEntries[2][2][0][0]), f * cR2);
-			Kokkos::atomic_add(
-				&values(this->_connEntries[2][2][1][0]), f * cR1);
-			// <m>*C_b += total V
-			f = this->_coefs(0, 0, 0, 0) * rate *
-				(comp1[Species::V] + comp2[Species::V]);
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][1][0][0]), f * cR2);
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][1][1][0]), f * cR1);
+			// <V>*C_b += total V    (slot [2][3])
+			f = this->_coefs(0, 0, 0, 0) * rate *
+				(comp1[Species::V] + comp2[Species::V]);
+			Kokkos::atomic_add(
+				&values(this->_connEntries[2][3][0][0]), f * cR2);
+			Kokkos::atomic_add(
+				&values(this->_connEntries[2][3][1][0]), f * cR1);
+		}
+		// <<< end HE-SSBM CHANGE (4b)
+	}
+}
+
+template <typename TSpeciesEnum>
+KOKKOS_INLINE_FUNCTION
+void
+PSIDissociationReaction<TSpeciesEnum>::computeCoefficients()
+{
+	// Check if the large bubble is involved
+	if (isLargeBubbleReaction) {
+		constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+		for (auto i : speciesRangeNoI) {
+			this->_widths(i()) = 1.0;
+		}
+		this->_coefs(0, 0, 0, 0) = 1.0;
+	}
+	else {
+		// Standard case
+		Superclass::computeCoefficients();
+	}
+}
+
+template <typename TSpeciesEnum>
+KOKKOS_INLINE_FUNCTION
+void
+PSIDissociationReaction<TSpeciesEnum>::computeFlux(
+	ConcentrationsView concentrations, FluxesView fluxes, IndexType gridIndex)
+{
+	// Standard case
+	if (not isLargeBubbleReaction) {
+		return Superclass::computeFlux(concentrations, fluxes, gridIndex);
+	}
+
+	// The rate need to be computed each time because it depends on the current
+	// large bubble size
+	auto rate = getRateForProduction(gridIndex);
+
+	// Binding energy
+	double omega = this->_clusterData->atomicVolume();
+	double T = this->_clusterData->temperature(gridIndex);
+	constexpr double k_B = ::xolotl::core::kBoltzmann;
+	double E_b = 2.15; // H in Void
+
+	rate *= (1.0 / omega) * std::exp(-E_b / (k_B * T));
+
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+	auto numClusters = this->_clusterData->numClusters;
+
+	// Get the standard cluster
+	auto stdClusterId = (this->_products[0] >= numClusters) ?
+		this->_products[1] :
+		this->_products[0];
+	auto cl = this->_clusterData->getCluster(stdClusterId);
+	auto clReg = cl.getRegion();
+	auto orig = clReg.getOrigin();
+	Composition comp(orig);
+
+	// Get the SSBM cluster
+	auto ssbmId = (this->_products[0] >= numClusters) ? this->_products[0] :
+														this->_products[1];
+
+	// Compute the flux
+	double f = this->_coefs(0, 0, 0, 0) * rate * concentrations(stdClusterId) *
+		concentrations(ssbmId);
+
+	// Large bubble is the reactant
+	if (this->_reactant >= numClusters) {
+		// H case
+		// B -> H_1 + B
+		if constexpr (psi::hasDeuterium<Species>) {
+			if (comp[Species::D] > 0) {
+				// The standard cluster always gains the flux
+				Kokkos::atomic_add(&fluxes[stdClusterId], f);
+
+				// The average H decrease
+				Kokkos::atomic_sub(&fluxes[ssbmId + 1], f * comp[Species::D]);
+			}
+		}
+	}
+}
+
+template <typename TSpeciesEnum>
+KOKKOS_INLINE_FUNCTION
+void
+PSIDissociationReaction<TSpeciesEnum>::computePartialDerivatives(
+	ConcentrationsView concentrations, Kokkos::View<double*> values,
+	IndexType gridIndex)
+{
+	// Standard case
+	if (not isLargeBubbleReaction) {
+		return Superclass::computePartialDerivatives(
+			concentrations, values, gridIndex);
+	}
+
+	// The rate need to be computed each time because it depends on the current
+	// large bubble size
+	auto rate = getRateForProduction(gridIndex);
+
+	// Binding energy
+	double omega = this->_clusterData->atomicVolume();
+	double T = this->_clusterData->temperature(gridIndex);
+	constexpr double k_B = ::xolotl::core::kBoltzmann;
+	double E_b = 2.15; // H in Void
+
+	rate *= (1.0 / omega) * std::exp(-E_b / (k_B * T));
+
+	// Compute the flux
+	double f = this->_coefs(0, 0, 0, 0) * rate;
+
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+	auto numClusters = this->_clusterData->numClusters;
+
+	// Get the standard cluster
+	auto stdClusterId = (this->_products[0] >= numClusters) ?
+		this->_products[1] :
+		this->_products[0];
+	auto cl = this->_clusterData->getCluster(stdClusterId);
+	auto clReg = cl.getRegion();
+	auto orig = clReg.getOrigin();
+	Composition comp(orig);
+
+	// Get the SSBM cluster
+	auto ssbmId = (this->_products[0] >= numClusters) ? this->_products[0] :
+														this->_products[1];
+
+	// Get the concentration
+	auto bC = concentrations(ssbmId);
+
+	// Large bubble is the reactant
+	if (this->_reactant >= numClusters) {
+		// H case
+		// B -> H_1 + B
+		if constexpr (psi::hasDeuterium<Species>) {
+			if (comp[Species::D] > 0) {
+				// The standard cluster always gains the flux
+				if (this->_products[0] >= numClusters) {
+					Kokkos::atomic_add(
+						&values(this->_connEntries[2][0][0][0]), f * bC);
+				}
+				else {
+					Kokkos::atomic_add(
+						&values(this->_connEntries[1][0][0][0]), f * bC);
+				}
+
+				// The H size decreases
+				f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::D];
+				if (this->_products[0] >= numClusters) {
+					Kokkos::atomic_sub(
+						&values(this->_connEntries[1][2][0][0]), f * bC);
+				}
+				else {
+					Kokkos::atomic_sub(
+						&values(this->_connEntries[2][2][0][0]), f * bC);
+				}
+			}
 		}
 	}
 }
