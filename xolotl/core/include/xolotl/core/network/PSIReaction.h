@@ -71,12 +71,19 @@ public:
 					this->_reactants[i], this->_reactantMomentIds[i]);
 			}
 			else {
-				// Bubble
+				// Bubble.
+				// Moment layout is network-relative: slot 0 is the He
+				// moment, the last slot (nMomentIds-1) is the V moment, and
+				// any intermediate slots are H-isotope moments (only present
+				// when the network has D/T). For the pure-He network
+				// nMomentIds==2 so we only have He (slot 0) and V (slot 1).
 				this->_reactantMomentIds[i][0] =
 					this->_clusterData->hAvId(); // He
-				this->_reactantMomentIds[i][1] =
-					this->_clusterData->hAvId(); // H
-				this->_reactantMomentIds[i][2] =
+				for (IndexType j = 1; j + 1 < Superclass::nMomentIds; ++j) {
+					this->_reactantMomentIds[i][j] =
+						this->_clusterData->hAvId(); // H isotope(s)
+				}
+				this->_reactantMomentIds[i][Superclass::nMomentIds - 1] =
 					this->_clusterData->voidAvId(); // V
 			}
 
@@ -93,14 +100,15 @@ public:
 					}
 				}
 				else {
-					// Bubble
-					this->_productMomentIds[i][0] =
-						this->_clusterData->voidAvId();
+					// Bubble (same network-relative layout as reactants)
 					this->_productMomentIds[i][0] =
 						this->_clusterData->hAvId(); // He
-					this->_productMomentIds[i][1] =
-						this->_clusterData->hAvId(); // H
-					this->_productMomentIds[i][2] =
+					for (IndexType j = 1; j + 1 < Superclass::nMomentIds;
+						 ++j) {
+						this->_productMomentIds[i][j] =
+							this->_clusterData->hAvId(); // H isotope(s)
+					}
+					this->_productMomentIds[i][Superclass::nMomentIds - 1] =
 						this->_clusterData->voidAvId(); // V
 				}
 			}
@@ -228,10 +236,14 @@ public:
 			this->copyMomentIds(this->_reactant, this->_reactantMomentIds);
 		}
 		else {
-			// Bubble
+			// Bubble (network-relative layout: He=slot 0, V=last slot)
 			this->_reactantMomentIds[0] = this->_clusterData->hAvId(); // He
-			this->_reactantMomentIds[1] = this->_clusterData->hAvId(); // H
-			this->_reactantMomentIds[2] = this->_clusterData->voidAvId(); // V
+			for (IndexType j = 1; j + 1 < Superclass::nMomentIds; ++j) {
+				this->_reactantMomentIds[j] =
+					this->_clusterData->hAvId(); // H isotope(s)
+			}
+			this->_reactantMomentIds[Superclass::nMomentIds - 1] =
+				this->_clusterData->voidAvId(); // V
 		}
 
 		for (auto i : {0, 1}) {
@@ -248,14 +260,15 @@ public:
 					}
 				}
 				else {
-					// Bubble
-					this->_productMomentIds[i][0] =
-						this->_clusterData->voidAvId();
+					// Bubble (network-relative layout)
 					this->_productMomentIds[i][0] =
 						this->_clusterData->hAvId(); // He
-					this->_productMomentIds[i][1] =
-						this->_clusterData->hAvId(); // H
-					this->_productMomentIds[i][2] =
+					for (IndexType j = 1; j + 1 < Superclass::nMomentIds;
+						 ++j) {
+						this->_productMomentIds[i][j] =
+							this->_clusterData->hAvId(); // H isotope(s)
+					}
+					this->_productMomentIds[i][Superclass::nMomentIds - 1] =
 						this->_clusterData->voidAvId(); // V
 				}
 			}
