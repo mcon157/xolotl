@@ -274,20 +274,19 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 		}
 
 		// ===================================================================
-		// >>> HE-SSBM CHANGE (1): He absorption in Case A (flux).
-		// Parallel to the H block above, retargeted to Species::He.
-		// Uses getMaxHePerV with hevRatio=4.0 (asymptote from Fig. 6.1 of
-		// the Sefta dissertation) instead of getMaxHPerV (which is for H).
-		// DOF layout per upstream comment on line ~345: slot +1 = <He>,
-		// slot +2 = <V>.
+		// >>> HE-SSBM: He absorption in Case A (flux). Parallel to the H
+		// block above, retargeted to Species::He. Uses getMaxHePerV with
+		// hevRatio=4.0 (asymptote from Fig. 6.1 of the Sefta dissertation).
+		// DOF offsets are absolute and network-independent:
+		//   ssbmId+1 = <He>*C_b (hAvId), ssbmId+2 = <V>*C_b (voidAvId).
 		// ===================================================================
 		// He case
-		// He_k + B -> B  (with optional trap-mutation product I_l)
+		// He_k + B -> B
 		if (comp[Species::He] > 0) {
 			// The standard cluster always loses the flux
 			Kokkos::atomic_sub(&fluxes[stdClusterId], f);
 
-			// The average He increases (slot +1 = hAvId, reused for He)
+			// The average He increases
 			Kokkos::atomic_add(&fluxes[ssbmId + 1], f * comp[Species::He]);
 
 			// Trap mutation case
@@ -304,11 +303,8 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 			constexpr double hevRatio = 4.0;
 			double maxHe = static_cast<double>(
 				psi::getMaxHePerV(
-					static_cast<typename NetworkType::AmountType>(
-						util::max(0.0, avV)),
-					hevRatio));
-			double sigmo =
-				computeSigmoid(comp[Species::He] + avHe, maxHe, 2.0);
+					static_cast<AmountType>(util::max(0.0, avV)), hevRatio));
+			double sigmo = computeSigmoid(comp[Species::He] + avHe, maxHe, 2.0);
 			if (maxHe == 0.0)
 				sigmo = 1.0;
 
@@ -316,7 +312,7 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 			if (this->_products[1] != Superclass::invalidIndex) {
 				Kokkos::atomic_add(&fluxes[this->_products[1]], f * sigmo);
 
-				// The average V increases (slot +2 = voidAvId)
+				// The average V increases
 				Composition prodComp(
 					this->_clusterData->getCluster(this->_products[1])
 						.getRegion()
@@ -329,7 +325,7 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 				Kokkos::atomic_add(&fluxes[ssbmId + 2], f * sigmo);
 			}
 		}
-		// <<< end HE-SSBM CHANGE (1)
+		// <<< end HE-SSBM
 	}
 
 	// Large bubble is one of the product
@@ -363,12 +359,12 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 				Kokkos::atomic_add(
 					&fluxes[this->_products[0] + 1], f * totalSize);
 			}
-			// >>> HE-SSBM CHANGE (2a): when V + HeV_b -> B, also grow
-			// <He>*C_b by the He content of the HeV (eq. 17).
+			// >>> HE-SSBM: also grow <He>*C_b by the He content of the HeV
+			// (eq. 17). Unconditional -- He is present in every PSI network.
 			totalSize = comp1[Species::He] + comp2[Species::He];
 			Kokkos::atomic_add(
 				&fluxes[this->_products[0] + 1], f * totalSize);
-			// <<< end HE-SSBM CHANGE (2a)
+			// <<< end HE-SSBM
 		}
 
 		// H case
@@ -391,11 +387,9 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 		}
 
 		// ===================================================================
-		// >>> HE-SSBM CHANGE (2): He absorption in Case B (flux).
-		// Parallel to the H block above, retargeted to Species::He.
-		// ===================================================================
-		// He case
+		// >>> HE-SSBM: He absorption in Case B (flux).
 		// He_a + He_bV -> B  (eqs. 1-4)
+		// ===================================================================
 		if (orig1.isOnAxis(Species::He) or orig2.isOnAxis(Species::He)) {
 			// Compute the total size
 			auto totalHeSize = comp1[Species::He] + comp2[Species::He];
@@ -410,7 +404,7 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 			Kokkos::atomic_add(
 				&fluxes[this->_products[0] + 2], f * totalVSize);
 		}
-		// <<< end HE-SSBM CHANGE (2)
+		// <<< end HE-SSBM
 	}
 }
 
@@ -435,6 +429,14 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 
 	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
 	auto numClusters = this->_clusterData->numClusters;
+
+	// Network-relative moment slots in _connEntries (second axis, size
+	// 1+nMomentIds). The He moment is always the first (slot 1); the V
+	// moment is always the last (slot nMomentIds). For the pure-He network
+	// nMomentIds==2 so V is slot 2, not 3 -- hardcoding 3 overruns the
+	// array on that network.
+	constexpr auto heMomId = 1;
+	constexpr auto vMomId = Superclass::nMomentIds;
 
 	// Large bubble is one of the reactants
 	if (this->_reactants[0] >= numClusters or
@@ -479,15 +481,15 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 			f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::V];
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][3][0][0]), f * stdC);
+					&values(this->_connEntries[0][vMomId][0][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][3][1][0]), f * bC);
+					&values(this->_connEntries[0][vMomId][1][0]), f * bC);
 			}
 			else {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][3][1][0]), f * stdC);
+					&values(this->_connEntries[1][vMomId][1][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][3][0][0]), f * bC);
+					&values(this->_connEntries[1][vMomId][0][0]), f * bC);
 			}
 		}
 		// Interstitial case
@@ -533,15 +535,15 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 			f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::I] * sigmo;
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[0][3][0][0]), f * stdC);
+					&values(this->_connEntries[0][vMomId][0][0]), f * stdC);
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[0][3][1][0]), f * bC);
+					&values(this->_connEntries[0][vMomId][1][0]), f * bC);
 			}
 			else {
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[1][3][1][0]), f * stdC);
+					&values(this->_connEntries[1][vMomId][1][0]), f * stdC);
 				Kokkos::atomic_sub(
-					&values(this->_connEntries[1][3][0][0]), f * bC);
+					&values(this->_connEntries[1][vMomId][0][0]), f * bC);
 			}
 		}
 
@@ -622,15 +624,15 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 						sigmo;
 					if (this->_reactants[0] >= numClusters) {
 						Kokkos::atomic_add(
-							&values(this->_connEntries[0][3][0][0]), f * stdC);
+							&values(this->_connEntries[0][vMomId][0][0]), f * stdC);
 						Kokkos::atomic_add(
-							&values(this->_connEntries[0][3][1][0]), f * bC);
+							&values(this->_connEntries[0][vMomId][1][0]), f * bC);
 					}
 					else {
 						Kokkos::atomic_add(
-							&values(this->_connEntries[1][3][1][0]), f * stdC);
+							&values(this->_connEntries[1][vMomId][1][0]), f * stdC);
 						Kokkos::atomic_add(
-							&values(this->_connEntries[1][3][0][0]), f * bC);
+							&values(this->_connEntries[1][vMomId][0][0]), f * bC);
 					}
 				}
 				else {
@@ -639,28 +641,24 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 					f = this->_coefs(0, 0, 0, 0) * rate * sigmo;
 					if (this->_reactants[0] >= numClusters) {
 						Kokkos::atomic_add(
-							&values(this->_connEntries[0][3][0][0]), f * stdC);
+							&values(this->_connEntries[0][vMomId][0][0]), f * stdC);
 						Kokkos::atomic_add(
-							&values(this->_connEntries[0][3][1][0]), f * bC);
+							&values(this->_connEntries[0][vMomId][1][0]), f * bC);
 					}
 					else {
 						Kokkos::atomic_add(
-							&values(this->_connEntries[1][3][1][0]), f * stdC);
+							&values(this->_connEntries[1][vMomId][1][0]), f * stdC);
 						Kokkos::atomic_add(
-							&values(this->_connEntries[1][3][0][0]), f * bC);
+							&values(this->_connEntries[1][vMomId][0][0]), f * bC);
 					}
 				}
 			}
 		}
 
 		// ===================================================================
-		// >>> HE-SSBM CHANGE (3): He absorption in Case A (partials).
-		// Parallel to the H block above, retargeted to Species::He.
-		// connEntries slot mapping (per upstream comment at line ~345):
-		//   [*][0] = C_b row
-		//   [*][1] = <He> moment row     <-- this is where we write He grows
-		//   [*][2] = <H>  moment row     (skipped in our He-only branch)
-		//   [*][3] = <V>  moment row     <-- this is where we write V grows
+		// >>> HE-SSBM: He absorption in Case A (partials). Parallel to the
+		// H block above. He moment -> slot [heMomId]=1, V moment -> slot
+		// [vMomId]=nMomentIds (network-relative).
 		// ===================================================================
 		// He case
 		if (comp[Species::He] > 0) {
@@ -680,19 +678,19 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 					&values(this->_connEntries[0][0][0][0]), f * bC);
 			}
 
-			// The He size increases (slot [1] = <He> moment row)
+			// The He size increases (slot [heMomId])
 			f = this->_coefs(0, 0, 0, 0) * rate * comp[Species::He];
 			if (this->_reactants[0] >= numClusters) {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][1][0][0]), f * stdC);
+					&values(this->_connEntries[0][heMomId][0][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[0][1][1][0]), f * bC);
+					&values(this->_connEntries[0][heMomId][1][0]), f * bC);
 			}
 			else {
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][1][1][0]), f * stdC);
+					&values(this->_connEntries[1][heMomId][1][0]), f * stdC);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[1][1][0][0]), f * bC);
+					&values(this->_connEntries[1][heMomId][0][0]), f * bC);
 			}
 
 			// Compute the average concentrations
@@ -704,15 +702,12 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 				avHe = 0.0;
 			}
 
-			// Sigmoid for trap mutation (eqs. 30-31)
+			// Sigmoid for trap mutation: He_k + B -> B + I
 			constexpr double hevRatio = 4.0;
 			double maxHe = static_cast<double>(
 				psi::getMaxHePerV(
-					static_cast<typename NetworkType::AmountType>(
-						util::max(0.0, avV)),
-					hevRatio));
-			double sigmo =
-				computeSigmoid(comp[Species::He] + avHe, maxHe, 2.0);
+					static_cast<AmountType>(util::max(0.0, avV)), hevRatio));
+			double sigmo = computeSigmoid(comp[Species::He] + avHe, maxHe, 2.0);
 			if (maxHe == 0.0)
 				sigmo = 1.0;
 
@@ -731,24 +726,24 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 					Kokkos::atomic_add(
 						&values(this->_connEntries[3][0][0][0]), f * bC);
 				}
-				// The average V increases (slot [3] = <V> moment row)
+				// The average V increases (slot [vMomId])
 				Composition prodComp(
 					this->_clusterData->getCluster(this->_products[1])
 						.getRegion()
 						.getOrigin());
-				f = this->_coefs(0, 0, 0, 0) * rate *
-					prodComp[Species::I] * sigmo;
+				f = this->_coefs(0, 0, 0, 0) * rate * prodComp[Species::I] *
+					sigmo;
 				if (this->_reactants[0] >= numClusters) {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][3][0][0]), f * stdC);
+						&values(this->_connEntries[0][vMomId][0][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][3][1][0]), f * bC);
+						&values(this->_connEntries[0][vMomId][1][0]), f * bC);
 				}
 				else {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][3][1][0]), f * stdC);
+						&values(this->_connEntries[1][vMomId][1][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][3][0][0]), f * bC);
+						&values(this->_connEntries[1][vMomId][0][0]), f * bC);
 				}
 			}
 			else {
@@ -756,19 +751,19 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 				f = this->_coefs(0, 0, 0, 0) * rate * sigmo;
 				if (this->_reactants[0] >= numClusters) {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][3][0][0]), f * stdC);
+						&values(this->_connEntries[0][vMomId][0][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[0][3][1][0]), f * bC);
+						&values(this->_connEntries[0][vMomId][1][0]), f * bC);
 				}
 				else {
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][3][1][0]), f * stdC);
+						&values(this->_connEntries[1][vMomId][1][0]), f * stdC);
 					Kokkos::atomic_add(
-						&values(this->_connEntries[1][3][0][0]), f * bC);
+						&values(this->_connEntries[1][vMomId][0][0]), f * bC);
 				}
 			}
 		}
-		// <<< end HE-SSBM CHANGE (3)
+		// <<< end HE-SSBM
 	}
 
 	// Large bubble is one of the product
@@ -812,21 +807,21 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 				Kokkos::atomic_add(
 					&values(this->_connEntries[2][2][1][0]), f * cR1);
 			}
-			// >>> HE-SSBM CHANGE (4a): when V + HeV_b -> B, also grow
-			// <He>*C_b by the He content of the HeV (eq. 17).
+			// >>> HE-SSBM: also grow <He>*C_b by He content of the HeV
+			// (eq. 17). Unconditional.
 			f = this->_coefs(0, 0, 0, 0) * rate *
 				(comp1[Species::He] + comp2[Species::He]);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][1][0][0]), f * cR2);
+				&values(this->_connEntries[2][heMomId][0][0]), f * cR2);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][1][1][0]), f * cR1);
-			// <<< end HE-SSBM CHANGE (4a)
+				&values(this->_connEntries[2][heMomId][1][0]), f * cR1);
+			// <<< end HE-SSBM
 			f = this->_coefs(0, 0, 0, 0) * rate *
 				(comp1[Species::V] + comp2[Species::V]);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][3][0][0]), f * cR2);
+				&values(this->_connEntries[2][vMomId][0][0]), f * cR2);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][3][1][0]), f * cR1);
+				&values(this->_connEntries[2][vMomId][1][0]), f * cR1);
 		}
 
 		// H case
@@ -857,20 +852,16 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 				f = this->_coefs(0, 0, 0, 0) * rate *
 					(comp1[Species::V] + comp2[Species::V]);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[2][3][0][0]), f * cR2);
+					&values(this->_connEntries[2][vMomId][0][0]), f * cR2);
 				Kokkos::atomic_add(
-					&values(this->_connEntries[2][3][1][0]), f * cR1);
+					&values(this->_connEntries[2][vMomId][1][0]), f * cR1);
 			}
 		}
 
 		// ===================================================================
-		// >>> HE-SSBM CHANGE (4b): He absorption in Case B (partials).
-		// Parallel to the H block above, retargeted to Species::He.
-		// He growth -> slot [2][1] (He moment).
-		// V growth  -> slot [2][3] (V moment).
+		// >>> HE-SSBM: He absorption in Case B (partials).
+		// He_a + He_bV -> B. He moment -> [heMomId], V moment -> [vMomId].
 		// ===================================================================
-		// He case
-		// He_a + He_bV -> B
 		if (orig1.isOnAxis(Species::He) or orig2.isOnAxis(Species::He)) {
 			// Both reactants decrease
 			Kokkos::atomic_sub(
@@ -887,22 +878,22 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 				&values(this->_connEntries[2][0][0][0]), f * cR2);
 			Kokkos::atomic_add(
 				&values(this->_connEntries[2][0][1][0]), f * cR1);
-			// <He>*C_b += total He   (slot [2][1])
+			// <He>*C_b += total He
 			f = this->_coefs(0, 0, 0, 0) * rate *
 				(comp1[Species::He] + comp2[Species::He]);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][1][0][0]), f * cR2);
+				&values(this->_connEntries[2][heMomId][0][0]), f * cR2);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][1][1][0]), f * cR1);
-			// <V>*C_b += total V    (slot [2][3])
+				&values(this->_connEntries[2][heMomId][1][0]), f * cR1);
+			// <V>*C_b += total V
 			f = this->_coefs(0, 0, 0, 0) * rate *
 				(comp1[Species::V] + comp2[Species::V]);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][3][0][0]), f * cR2);
+				&values(this->_connEntries[2][vMomId][0][0]), f * cR2);
 			Kokkos::atomic_add(
-				&values(this->_connEntries[2][3][1][0]), f * cR1);
+				&values(this->_connEntries[2][vMomId][1][0]), f * cR1);
 		}
-		// <<< end HE-SSBM CHANGE (4b)
+		// <<< end HE-SSBM
 	}
 }
 
