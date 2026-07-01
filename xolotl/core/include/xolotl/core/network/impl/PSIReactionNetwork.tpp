@@ -354,13 +354,9 @@ PSIReactionNetwork<TSpeciesEnum>::updateBurstingConcs(
 	}
 
 	// ===================================================================
-	// >>> HE-SSBM CHANGE (7): pin-hole bursting of the SSBM bubble.
-	// Implements eqs. (32)-(33) of equations.pdf.
-	// DOF offsets (per upstream comment at line ~345):
-	//   bubbleId + 0 : C_b
-	//   bubbleId + 1 : <He>*C_b (slot reused: same DOF as <H> in mixed nets)
-	//   bubbleId + 2 : <V>*C_b
-	// Helium escapes the bubble; the vacancy void persists.
+	// >>> HE-SSBM: pin-hole bursting of the SSBM bubble (eqs. 32-33).
+	// DOF offsets: bubbleId+1 = <He>*C_b, bubbleId+2 = <V>*C_b.
+	// Helium escapes; the vacancy void persists (C_b and <V>*C_b kept).
 	// ===================================================================
 	if (this->_enableSSBM) {
 		auto clusterDataMirror = this->getClusterDataMirror();
@@ -371,7 +367,7 @@ PSIReactionNetwork<TSpeciesEnum>::updateBurstingConcs(
 			gridPointSolution[bId + 1] -= He_tot * factor;
 		}
 	}
-	// <<< end HE-SSBM CHANGE (7)
+	// <<< end HE-SSBM
 }
 
 template <typename TSpeciesEnum>
@@ -950,15 +946,10 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 		}
 
 		// ===================================================================
-		// >>> HE-SSBM CHANGE (5): He-axis trigger.
-		// Parallel to the H block above, retargeted to Species::He.
+		// >>> HE-SSBM: He-axis production trigger (parallel to H block).
+		// He_k + B -> B, with optional trap-mutation I product.
 		// ===================================================================
-		// He case
 		if (lo.isOnAxis(Species::He)) {
-			// He_k + B -> B
-
-			// Only add trap mutation so that at run time it adds the I
-			// concentration if needed.
 			auto& subpaving = this->getSubpaving();
 			Composition comp = Composition::zero();
 			comp[Species::I] = 1;
@@ -971,7 +962,7 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 					tag, {i, bubbleId, bubbleId, iClusterId});
 			}
 		}
-		// <<< end HE-SSBM CHANGE (5)
+		// <<< end HE-SSBM
 	}
 
 	// Get the composition of each cluster
@@ -998,15 +989,13 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 		}
 	}
 
-	// >>> HE-SSBM CHANGE (6): He+HeV overflow trigger.
-	// Note: largestImpSize is set from Species::He on line ~945; the H
-	// branch overrides it to Species::D inside the hasDeuterium block.
-	// For pure He networks largestImpSize is already correct for He.
-	// He_a + He_bV -> B
+	// >>> HE-SSBM: He_a + He_bV -> B overflow trigger. Uses the He edge of
+	// the phase space directly (hiLargest[He]) so it is independent of the
+	// D override applied to largestImpSize above.
 	if (hi1[Species::He] + hi2[Species::He] - 2 > hiLargest[Species::He] - 1) {
 		this->addProductionReaction(tag, {i, j, bubbleId});
 	}
-	// <<< end HE-SSBM CHANGE (6)
+	// <<< end HE-SSBM
 
 	// V_a + HV_b -> B
 	if (hi1[Species::V] + hi2[Species::V] - 2 > largestVSize) {
