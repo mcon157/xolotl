@@ -153,6 +153,7 @@ private:
 		SINK_STRENGTH,
 		DEPTH,
 		F_BURSTING,
+		TAU_BURSTING,
 		NUM_FLOAT_VALS
 	};
 
@@ -177,6 +178,7 @@ private:
 		READ_RATES,
 		CONSTANT_REACTION,
 		LARGE_BUBBLE,
+		BURSTING_REACTION,
 		NUM_BOOL_VALS
 	};
 
@@ -345,6 +347,19 @@ public:
 	setFBursting(double val)
 	{
 		setVal(_floatVals, F_BURSTING, val);
+	}
+
+	KOKKOS_INLINE_FUNCTION
+	double
+	getTauBursting() const
+	{
+		return _floatVals[TAU_BURSTING];
+	}
+
+	void
+	setTauBursting(double val)
+	{
+		setVal(_floatVals, TAU_BURSTING, val);
 	}
 
 	KOKKOS_INLINE_FUNCTION
@@ -527,6 +542,19 @@ public:
 	setEnableSSBM(bool val)
 	{
 		setVal(_boolVals, LARGE_BUBBLE, val);
+	}
+
+	KOKKOS_INLINE_FUNCTION
+	bool
+	enableBurstingReaction() const
+	{
+		return _boolVals[BURSTING_REACTION];
+	}
+
+	void
+	setEnableBurstingReaction(bool val)
+	{
+		setVal(_boolVals, BURSTING_REACTION, val);
 	}
 
 private:
