@@ -303,6 +303,18 @@ public:
 		_enableSSBM = ssbm;
 	}
 
+	bool
+	getEnableBurstingReaction() const noexcept
+	{
+		return _enableBurstingReaction;
+	}
+
+	virtual void
+	setEnableBurstingReaction(bool bursting)
+	{
+		_enableBurstingReaction = bursting;
+	}
+
 	IndexType
 	getGridSize() const noexcept
 	{
@@ -636,6 +648,7 @@ protected:
 	bool _enableReducedJacobian{};
 	bool _enableReadRates{};
 	bool _enableSSBM{};
+	bool _enableBurstingReaction{};
 
 	IndexType _gridSize{};
 	IndexType _numDOFs{};
