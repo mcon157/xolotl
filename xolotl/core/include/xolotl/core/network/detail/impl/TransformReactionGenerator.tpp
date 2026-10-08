@@ -49,8 +49,11 @@ TransformReactionGenerator<TBase>::addTransformReaction(
 {
 	if (!this->_clusterData.enableStdReaction())
 		return;
-
-	Kokkos::atomic_inc(&_clusterTransformReactionCounts(clusterSet.cluster0));
+	// Reactions of the extra DOFs all go in the last bucket
+	auto bucket = (clusterSet.cluster0 < this->_clusterData.numClusters) ?
+		clusterSet.cluster0 :
+		this->_clusterData.numClusters;
+	Kokkos::atomic_inc(&_clusterTransformReactionCounts(bucket));
 }
 
 template <typename TBase>
@@ -62,7 +65,10 @@ TransformReactionGenerator<TBase>::addTransformReaction(
 	if (!this->_clusterData.enableStdReaction())
 		return;
 
-	auto id = _transformCrsRowMap(clusterSet.cluster0);
+	auto bucket = (clusterSet.cluster0 < this->_clusterData.numClusters) ?
+		clusterSet.cluster0 :
+		this->_clusterData.numClusters;
+	auto id = _transformCrsRowMap(bucket);
 	for (; !util::atomicCompareExchangeStrong(
 			 &_transformCrsClusterSets(id).cluster0,
 			 NetworkType::invalidIndex(), clusterSet.cluster0);
