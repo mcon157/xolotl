@@ -137,7 +137,7 @@ ConfOptions::readParams(int argc, const char* argv[])
 		bpo::value<std::string>(),
 		"List of all the processes to use in the simulation (reaction, diff, "
 		"advec, modifiedTM, movingSurface, bursting, attenuation, resolution, "
-		"heterogeneous, sink, soret, constant, noSolve).")("grain",
+		"heterogeneous, sink, soret, constant, noSolve, SSBM, burstingReaction).")("grain",
 		bpo::value<std::string>(&gbList),
 		"This option allows the user to add GB in the X, Y, or Z directions. "
 		"To do so, simply write the direction followed "
@@ -179,7 +179,8 @@ ConfOptions::readParams(int argc, const char* argv[])
 		"probability of bursting (10.0 nm if nothing is specified).")(
 		"burstingFactor", bpo::value<double>(&burstingFactor),
 		"This option allows the user to set the factor used in computing the "
-		"likelihood of a bursting event.")("rng", bpo::value<std::string>(),
+		"likelihood of a bursting event (with the burstingReaction process "
+		"it is the rate prefactor f, in 1/s).")("rng", bpo::value<std::string>(),
 		"Allows user to specify seed used to initialize random number "
 		"generator (default = determined from current time) and "
 		"whether each process should print the seed value "
