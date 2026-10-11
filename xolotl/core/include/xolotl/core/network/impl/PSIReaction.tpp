@@ -288,10 +288,7 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 			Kokkos::atomic_add(&fluxes[ssbmId + 1], f * comp[Species::He]);
 
 			// Trap mutation case
-			// Compute the average concentrations. Guard before dividing:
-			// Newton produces tiny and occasionally negative concentrations
-			// on intermediate iterates, and dividing first raises FE flags
-			// even when the result is later overwritten.
+			// Compute the average concentrations.
 			auto conc = concentrations(ssbmId);
 			double avV = 0.0;
 			double avHe = 0.0;
@@ -349,7 +346,7 @@ PSIProductionReaction<TSpeciesEnum>::computeFlux(
 
 		// X_a + Y_b -> B
 		//
-		// SINGLE DISPATCH. The original code had one independent `if` per
+		// The original code had one independent `if` per
 		// species axis. For a reaction such as He_a + V_b -> B, both the V
 		// test and the He test are true, so both blocks fired: the reactants
 		// were subtracted twice and the product added twice. 
@@ -412,11 +409,7 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 	// the same layout: 0 is the concentration, 1..nMomentIds are the moments.
 	// The gas (He) moment is always slot 1; the V moment is always the last
 	// slot, nMomentIds.
-	//
-	// For the full He/D/V network nMomentIds == 3, so V is slot 3 and the
-	// hardcoded literals that used to appear here happened to be right. For a
-	// pure-He network nMomentIds == 2, so V is slot 2 and a literal 3 reads
-	// past the end of the array.
+
 	constexpr auto gasMomId = 1;
 	constexpr auto vMomId = Superclass::nMomentIds;
 
@@ -872,9 +865,7 @@ PSIProductionReaction<TSpeciesEnum>::computePartialDerivatives(
 		double f = this->_coefs(0, 0, 0, 0) * rate;
 
 		// X_a + Y_b -> B
-		// Single dispatch, mirroring computeFlux. See the comment there: one
-		// independent `if` per species axis double-counted any reaction whose
-		// reactants sat on two of the tested axes.
+		// Single dispatch, mirroring computeFlux
 		bool isBubbleForming = orig1.isOnAxis(Species::V) or
 			orig2.isOnAxis(Species::V) or orig1.isOnAxis(Species::He) or
 			orig2.isOnAxis(Species::He);
@@ -1256,12 +1247,7 @@ KOKKOS_INLINE_FUNCTION
 double
 PSITransformReaction<TSpeciesEnum>::getAppliedRate(IndexType gridIndex) const
 {
-	using NetworkType = typename Superclass::NetworkType;
-	using Species = typename NetworkType::Species;
-	using Composition = typename NetworkType::Composition;
-	using AmountType = typename NetworkType::AmountType;
-
-	// Get the radius of the cluster
+	// Get the radius of the bursting bubble
 	double radius = 0.0;
 	if (isLargeBubbleReaction) {
 		radius = this->_clusterData->bubbleAvRad();
@@ -1271,12 +1257,17 @@ PSITransformReaction<TSpeciesEnum>::getAppliedRate(IndexType gridIndex) const
 		radius = cl.getReactionRadius();
 	}
 
-	// Get the current depth
-	auto depth = this->_clusterData->getDepth();
-	auto f = this->_clusterData->getFBursting();
+	// Depth of the current grid point and the bursting parameters
+	double depth = this->_clusterData->getDepth();
+	double tau = this->_clusterData->getTauBursting();
+	double f = this->_clusterData->getFBursting();
 
-	// TODO: change rate
-	return f * util::computeSigmoid(radius, depth, 2.0);
+	if (depth <= 0.0 or tau <= 0.0)
+		return 0.0;
+
+	// k_B = f (r/d) min(1, exp(-(d - tau)/(2 tau)))
+	return f * (radius / depth) *
+		util::min(1.0, exp(-(depth - tau) / (2.0 * tau)));
 }
 
 template <typename TSpeciesEnum>
@@ -1284,17 +1275,146 @@ KOKKOS_INLINE_FUNCTION
 void
 PSITransformReaction<TSpeciesEnum>::computeCoefficients()
 {
-	// Check if the large bubble is involved
-	if (isLargeBubbleReaction) {
-		constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
-		for (auto i : speciesRangeNoI) {
-			this->_widths(i()) = 1.0;
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+
+	// Start from zero
+	for (auto i : speciesRangeNoI) {
+		for (auto k : speciesRangeNoI) {
+			this->_coefs(i() + 1, 0, 0, k() + 1) = 0.0;
 		}
-		this->_coefs(0, 0, 0, 0) = 1.0;
+		this->_coefs(i() + 1, 0, 0, 0) = 0.0;
+		this->_coefs(0, 0, 0, i() + 1) = 0.0;
 	}
-	else {
-		// Standard case
-		Superclass::computeCoefficients();
+
+	// Single size bubble: the flux is directly proportional to <He>C_b
+	if (isLargeBubbleReaction) {
+		this->_coefs(0, 0, 0, 0) = 1.0;
+		return;
+	}
+
+	// Standard cluster: fraction of the (possibly grouped) reactant that sits
+	// at the V size of the product, and its first moments along V
+	auto clReg = this->_clusterData->getCluster(this->_reactant).getRegion();
+	auto prReg = this->_clusterData->getCluster(this->_product).getRegion();
+	Composition lo = clReg.getOrigin();
+	Composition hi = clReg.getUpperLimitPoint();
+	Composition prod = prReg.getOrigin();
+	double nV = prod[Species::V];
+	double widthV = hi[Species::V] - lo[Species::V];
+	double c0 = clReg.volume() / widthV;
+	this->_coefs(0, 0, 0, 0) = c0;
+
+	auto disp = clReg.dispersion();
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] == invalidIndex)
+			continue;
+		if (i != Species::V)
+			continue;
+		double dV = nV - (hi[Species::V] + lo[Species::V] - 1) / 2.0;
+		this->_coefs(i() + 1, 0, 0, 0) = c0 * dV;
+		this->_coefs(0, 0, 0, i() + 1) = c0 * dV / disp[i()];
+		this->_coefs(i() + 1, 0, 0, i() + 1) = c0 * dV * dV / disp[i()];
+	}
+}
+
+template <typename TSpeciesEnum>
+KOKKOS_INLINE_FUNCTION
+void
+PSITransformReaction<TSpeciesEnum>::computeConnectivity(
+	const Connectivity& connectivity)
+{
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+
+	// Single size bubble: only <He>C_b depends on <He>C_b
+	if (isLargeBubbleReaction) {
+		auto heId = _reactantMomentIds[0];
+		this->addConnectivity(heId, heId, connectivity);
+		return;
+	}
+
+	this->addConnectivity(this->_reactant, this->_reactant, connectivity);
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] != invalidIndex) {
+			this->addConnectivity(
+				this->_reactant, _reactantMomentIds[i()], connectivity);
+			this->addConnectivity(
+				_reactantMomentIds[i()], this->_reactant, connectivity);
+			for (auto j : speciesRangeNoI) {
+				if (_reactantMomentIds[j()] != invalidIndex) {
+					this->addConnectivity(_reactantMomentIds[i()],
+						_reactantMomentIds[j()], connectivity);
+				}
+			}
+		}
+	}
+	this->addConnectivity(this->_product, this->_reactant, connectivity);
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] != invalidIndex) {
+			this->addConnectivity(
+				this->_product, _reactantMomentIds[i()], connectivity);
+		}
+	}
+}
+
+template <typename TSpeciesEnum>
+KOKKOS_INLINE_FUNCTION
+void
+PSITransformReaction<TSpeciesEnum>::computeReducedConnectivity(
+	const Connectivity& connectivity)
+{
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+
+	if (isLargeBubbleReaction) {
+		auto heId = _reactantMomentIds[0];
+		this->addConnectivity(heId, heId, connectivity);
+		return;
+	}
+
+	this->addConnectivity(this->_reactant, this->_reactant, connectivity);
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] != invalidIndex) {
+			this->addConnectivity(
+				_reactantMomentIds[i()], _reactantMomentIds[i()], connectivity);
+		}
+	}
+}
+
+template <typename TSpeciesEnum>
+KOKKOS_INLINE_FUNCTION
+void
+PSITransformReaction<TSpeciesEnum>::mapJacobianEntries(
+	Connectivity connectivity)
+{
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+
+	if (isLargeBubbleReaction) {
+		auto heId = _reactantMomentIds[0];
+		_burstEntries[0][1][0][1] = connectivity(heId, heId);
+		return;
+	}
+
+	_burstEntries[0][0][0][0] = connectivity(this->_reactant, this->_reactant);
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] != invalidIndex) {
+			_burstEntries[0][0][0][1 + i()] =
+				connectivity(this->_reactant, _reactantMomentIds[i()]);
+			_burstEntries[0][1 + i()][0][0] =
+				connectivity(_reactantMomentIds[i()], this->_reactant);
+			for (auto j : speciesRangeNoI) {
+				if (_reactantMomentIds[j()] != invalidIndex) {
+					_burstEntries[0][1 + i()][0][1 + j()] = connectivity(
+						_reactantMomentIds[i()], _reactantMomentIds[j()]);
+				}
+			}
+		}
+	}
+
+	_burstEntries[1][0][0][0] = connectivity(this->_product, this->_reactant);
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] != invalidIndex) {
+			_burstEntries[1][0][0][1 + i()] =
+				connectivity(this->_product, _reactantMomentIds[i()]);
+		}
 	}
 }
 
@@ -1304,28 +1424,49 @@ void
 PSITransformReaction<TSpeciesEnum>::computeFlux(
 	ConcentrationsView concentrations, FluxesView fluxes, IndexType gridIndex)
 {
-	// Standard case
-	if (not isLargeBubbleReaction) {
-		return Superclass::computeFlux(concentrations, fluxes, gridIndex);
-	}
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
 
 	auto rate = this->getAppliedRate(gridIndex);
 
-	auto ssbmId = this->_product;
-	auto avV = concentrations(ssbmId + 2) / concentrations(ssbmId);
-	auto avH = concentrations(ssbmId + 1) / concentrations(ssbmId);
-	if (concentrations(ssbmId) == 0.0) {
-		avV = 0.0;
-		avH = 0.0;
+	// Single size bubble: B -> B, f(<He>C_b) = -k_B <He>C_b
+	if (isLargeBubbleReaction) {
+		auto heId = _reactantMomentIds[0];
+		Kokkos::atomic_sub(&fluxes[heId], rate * concentrations[heId]);
+		return;
 	}
 
-	// Get the largest cluster
-	double largestHSize = this->_clusterData->maxHSize();
-	// Threshold contribution
-	double sigmo = util::computeSigmoid(avH, largestHSize, 2.0);
+	// Standard cluster: He_iV_j -> V_j
+	auto cR = concentrations[this->_reactant];
+	Kokkos::Array<double, nMomentIds> cmR;
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] == invalidIndex)
+			cmR[i()] = 0.0;
+		else
+			cmR[i()] = concentrations[_reactantMomentIds[i()]];
+	}
 
-	Kokkos::atomic_sub(
-		&fluxes[ssbmId + 1], rate * concentrations[ssbmId + 1] * sigmo);
+	// 0th order moment
+	double f = this->_coefs(0, 0, 0, 0) * cR;
+	for (auto i : speciesRangeNoI) {
+		f += this->_coefs(i() + 1, 0, 0, 0) * cmR[i()];
+	}
+	f *= rate;
+
+	Kokkos::atomic_sub(&fluxes[this->_reactant], f / _reactantVolume);
+	Kokkos::atomic_add(&fluxes[this->_product], f / _productWidth);
+
+	// First order moments of the reactant
+	for (auto k : speciesRangeNoI) {
+		if (_reactantMomentIds[k()] != invalidIndex) {
+			f = this->_coefs(0, 0, 0, k() + 1) * cR;
+			for (auto i : speciesRangeNoI) {
+				f += this->_coefs(i() + 1, 0, 0, k() + 1) * cmR[i()];
+			}
+			f *= rate;
+			Kokkos::atomic_sub(
+				&fluxes[_reactantMomentIds[k()]], f / _reactantVolume);
+		}
+	}
 }
 
 template <typename TSpeciesEnum>
@@ -1335,28 +1476,81 @@ PSITransformReaction<TSpeciesEnum>::computePartialDerivatives(
 	ConcentrationsView concentrations, Kokkos::View<double*> values,
 	IndexType gridIndex)
 {
-	// Standard case
-	if (not isLargeBubbleReaction) {
-		return Superclass::computePartialDerivatives(
-			concentrations, values, gridIndex);
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
+
+	// The rate depends on the radius (and so on <V> for the single size
+	// bubble) but it is treated as constant here, like the radius used by the
+	// other SSBM reactions
+	auto rate = this->getAppliedRate(gridIndex);
+
+	if (isLargeBubbleReaction) {
+		Kokkos::atomic_sub(&values(_burstEntries[0][1][0][1]), rate);
+		return;
 	}
+
+	// 0th order moments, first for the reactant
+	double df = rate / _reactantVolume;
+	Kokkos::atomic_sub(
+		&values(_burstEntries[0][0][0][0]), df * this->_coefs(0, 0, 0, 0));
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] != invalidIndex) {
+			Kokkos::atomic_sub(&values(_burstEntries[0][0][0][1 + i()]),
+				df * this->_coefs(i() + 1, 0, 0, 0));
+		}
+	}
+	// Then for the product
+	df = rate / _productWidth;
+	Kokkos::atomic_add(
+		&values(_burstEntries[1][0][0][0]), df * this->_coefs(0, 0, 0, 0));
+	for (auto i : speciesRangeNoI) {
+		if (_reactantMomentIds[i()] != invalidIndex) {
+			Kokkos::atomic_add(&values(_burstEntries[1][0][0][1 + i()]),
+				df * this->_coefs(i() + 1, 0, 0, 0));
+		}
+	}
+
+	// First order moments of the reactant
+	df = rate / _reactantVolume;
+	for (auto k : speciesRangeNoI) {
+		if (_reactantMomentIds[k()] != invalidIndex) {
+			Kokkos::atomic_sub(&values(_burstEntries[0][1 + k()][0][0]),
+				df * this->_coefs(0, 0, 0, k() + 1));
+			for (auto i : speciesRangeNoI) {
+				if (_reactantMomentIds[i()] != invalidIndex) {
+					Kokkos::atomic_sub(
+						&values(_burstEntries[0][1 + k()][0][1 + i()]),
+						df * this->_coefs(i() + 1, 0, 0, k() + 1));
+				}
+			}
+		}
+	}
+}
+
+template <typename TSpeciesEnum>
+KOKKOS_INLINE_FUNCTION
+void
+PSITransformReaction<TSpeciesEnum>::computeReducedPartialDerivatives(
+	ConcentrationsView concentrations, Kokkos::View<double*> values,
+	IndexType gridIndex)
+{
+	constexpr auto speciesRangeNoI = NetworkType::getSpeciesRangeNoI();
 
 	auto rate = this->getAppliedRate(gridIndex);
 
-	auto ssbmId = this->_product;
-	auto avV = concentrations(ssbmId + 2) / concentrations(ssbmId);
-	auto avH = concentrations(ssbmId + 1) / concentrations(ssbmId);
-	if (concentrations(ssbmId) == 0.0) {
-		avV = 0.0;
-		avH = 0.0;
+	if (isLargeBubbleReaction) {
+		Kokkos::atomic_sub(&values(_burstEntries[0][1][0][1]), rate);
+		return;
 	}
 
-	// Get the largest cluster
-	double largestHSize = this->_clusterData->maxHSize();
-	// Threshold contribution
-	double sigmo = util::computeSigmoid(avH, largestHSize, 2.0);
-
-	Kokkos::atomic_sub(&values(this->_connEntries[1][2][0][0]), rate * sigmo);
+	double df = rate / _reactantVolume;
+	Kokkos::atomic_sub(
+		&values(_burstEntries[0][0][0][0]), df * this->_coefs(0, 0, 0, 0));
+	for (auto k : speciesRangeNoI) {
+		if (_reactantMomentIds[k()] != invalidIndex) {
+			Kokkos::atomic_sub(&values(_burstEntries[0][1 + k()][0][1 + k()]),
+				df * this->_coefs(k() + 1, 0, 0, k() + 1));
+		}
+	}
 }
 } // namespace network
 } // namespace core
