@@ -345,6 +345,23 @@ public:
 	getSinkStrength();
 };
 
+/**
+ * @brief He bubble bursting, written as a transform reaction.
+ *
+ * Two cases:
+ *  - standard cluster: He_iV_j -> V_j. The He leaves through the surface
+ *    and the empty vacancy cluster stays. Grouped clusters are handled one
+ *    V slice at a time (one reaction per V cluster covered by the group).
+ *  - single size bubble (SSBM): B -> B. Only the total He content of the
+ *    bubble, <He>C_b, decreases.
+ *
+ * The rate is the one of the stochastic bursting model, used here as a
+ * deterministic rate:
+ *   k_B = f (r/d) min(1, exp(-(d - tau)/(2 tau)))
+ * with f = burstingFactor (1/s), tau = burstingDepth (nm), d the depth of
+ * the grid point and r the radius of the cluster (or of the single size
+ * bubble). Note r/d = 1 - L/d with L = d - r the ligament thickness.
+ */
 template <typename TSpeciesEnum>
 class PSITransformReaction :
 	public TransformReaction<PSIReactionNetwork<TSpeciesEnum>,
@@ -363,6 +380,7 @@ public:
 	using Region = typename Superclass::Region;
 	using ConcentrationsView = typename Superclass::ConcentrationsView;
 	using FluxesView = typename Superclass::FluxesView;
+	using Connectivity = typename Superclass::Connectivity;
 	using Species = typename Superclass::Species;
 
 	KOKKOS_INLINE_FUNCTION
@@ -381,23 +399,35 @@ public:
 
 		auto numClusters = clusterData.numClusters;
 		// Check if the single size is involved
-		if (cluster0 >= numClusters)
-			isLargeBubbleReaction = true;
-		if (cluster1 >= numClusters)
+		if (cluster0 >= numClusters or cluster1 >= numClusters)
 			isLargeBubbleReaction = true;
 
-		// static
-		const auto dummyRegion = Region(Composition{});
-
-		// Product
-		if (this->_product < numClusters) {
-			this->copyMomentIds(this->_product, this->_productMomentIds);
+		if (isLargeBubbleReaction) {
+			// Bubble, network-relative layout: gas moment in slot 0, V moment
+			// in the last slot, H isotope slots (if any) alias the gas moment
+			_reactantMomentIds[0] = this->_clusterData->hAvId(); // He
+			for (IndexType j = 1; j + 1 < nMomentIds; ++j) {
+				_reactantMomentIds[j] = this->_clusterData->hAvId(); // H
+			}
+			_reactantMomentIds[nMomentIds - 1] =
+				this->_clusterData->voidAvId(); // V
+			for (IndexType j = 0; j < nMomentIds; ++j) {
+				this->_productMomentIds[j] = _reactantMomentIds[j];
+			}
+			_reactantVolume = 1.0;
 		}
 		else {
-			// Bubble
-			this->_productMomentIds[0] = this->_clusterData->hAvId(); // He
-			this->_productMomentIds[1] = this->_clusterData->hAvId(); // H
-			this->_productMomentIds[2] = this->_clusterData->voidAvId(); // V
+			this->copyMomentIds(this->_reactant, _reactantMomentIds);
+			this->copyMomentIds(this->_product, this->_productMomentIds);
+			_reactantVolume = this->_clusterData->getCluster(this->_reactant)
+								  .getRegion()
+								  .volume();
+			// The product V cluster is simplex for V <= maxV in the PSI
+			// network, but divide by its V width in case it is grouped (its
+			// concentration is then an average over that width).
+			_productWidth = this->_clusterData->getCluster(this->_product)
+								.getRegion()[Species::V]
+								.length();
 		}
 
 		this->initialize();
@@ -430,8 +460,36 @@ public:
 	computePartialDerivatives(ConcentrationsView concentrations,
 		Kokkos::View<double*> values, IndexType gridIndex);
 
+	KOKKOS_INLINE_FUNCTION
+	void
+	computeReducedPartialDerivatives(ConcentrationsView concentrations,
+		Kokkos::View<double*> values, IndexType gridIndex);
+
+	KOKKOS_INLINE_FUNCTION
+	void
+	computeConnectivity(const Connectivity& connectivity);
+
+	KOKKOS_INLINE_FUNCTION
+	void
+	computeReducedConnectivity(const Connectivity& connectivity);
+
+	KOKKOS_INLINE_FUNCTION
+	void
+	mapJacobianEntries(Connectivity connectivity);
+
 private:
+	static constexpr auto invalidIndex = Superclass::invalidIndex;
+	static constexpr auto nMomentIds = Superclass::nMomentIds;
+
 	bool isLargeBubbleReaction = false;
+
+	util::Array<IndexType, nMomentIds> _reactantMomentIds;
+	double _reactantVolume{1.0};
+	double _productWidth{1.0};
+
+	// [0: reactant row, 1: product row][0: conc, 1..: moment rows]
+	// [unused][0: conc, 1..: moment columns]
+	util::Array<IndexType, 2, 1 + nMomentIds, 1, 1 + nMomentIds> _burstEntries;
 };
 
 template <typename TSpeciesEnum>
