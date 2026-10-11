@@ -109,6 +109,15 @@ public:
 		Kokkos::View<double*> values, IndexType gridIndex, double surfaceDepth,
 		double spacing);
 
+	/**
+	 * Update the grid-point dependent data used by the SSBM and bursting
+	 * reactions: the depth of the current grid point and the radius of the
+	 * single size bubble computed from its average vacancy content <V>.
+	 */
+	void
+	updateSSBMAndBurstingData(
+		ConcentrationsView concentrations, double surfaceDepth);
+
 	double
 	getTotalTrappedHeliumConcentration(
 		ConcentrationsView concs, AmountType minSize = 0) override
@@ -233,6 +242,11 @@ public:
 	KOKKOS_INLINE_FUNCTION
 	void
 	addSingleSizeReactions(IndexType i, IndexType j, TTag tag) const;
+
+	template <typename TTag>
+	KOKKOS_INLINE_FUNCTION
+	void
+	addBurstings(IndexType i, TTag tag) const;
 
 private:
 	ReactionCollection<NetworkType>
