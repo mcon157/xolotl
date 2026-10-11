@@ -94,6 +94,13 @@ ReactionNetwork<TImpl>::ReactionNetwork(const Subpaving& subpaving,
 	this->setEnableAttenuation(map["attenuation"]);
 	this->setEnableConstantReaction(map["constant"]);
 	this->setEnableSSBM(map["SSBM"]);
+	// He bubble bursting as a reaction (PSI only). The rate parameters are
+	// the same options as the stochastic monitor bursting: burstingDepth is
+	// the characteristic depth tau (nm) and burstingFactor the prefactor f
+	// (1/s).
+	this->setEnableBurstingReaction(map["burstingReaction"]);
+	_clusterData.h_view().setTauBursting(opts.getBurstingDepth());
+	_clusterData.h_view().setFBursting(opts.getBurstingFactor());
 	std::string petscString = opts.getPetscArg();
 	auto tokens = util::Tokenizer<>{petscString}();
 	bool useReduced = false;
@@ -309,6 +316,15 @@ ReactionNetwork<TImpl>::setEnableSSBM(bool ssbm)
 {
 	this->_enableSSBM = ssbm;
 	_clusterData.h_view().setEnableSSBM(this->_enableSSBM);
+}
+
+template <typename TImpl>
+void
+ReactionNetwork<TImpl>::setEnableBurstingReaction(bool bursting)
+{
+	this->_enableBurstingReaction = bursting;
+	_clusterData.h_view().setEnableBurstingReaction(
+		this->_enableBurstingReaction);
 }
 
 template <typename TImpl>
