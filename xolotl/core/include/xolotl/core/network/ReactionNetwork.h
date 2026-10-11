@@ -264,6 +264,9 @@ public:
 	setEnableSSBM(bool ssbm) override;
 
 	void
+	setEnableBurstingReaction(bool bursting) override;
+
+	void
 	setGridSize(IndexType gridSize) override;
 
 	void
@@ -887,7 +890,10 @@ protected:
 	ConnectivitiesPairView _constantConnsRows;
 	ConnectivitiesPairView _constantConnsEntries;
 
-	double _currentTime;
+	// Must be initialized: setTemperatures() passes it to updateReactionRates()
+	// before setTime() is ever called, and the trap-mutation reactions turn
+	// it into their rate (1000 x time) until the PSI network overrides it.
+	double _currentTime{0.0};
 
 	std::vector<AmountType> _minRadiusSizes;
 };
