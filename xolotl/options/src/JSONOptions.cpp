@@ -300,7 +300,7 @@ JSONOptions::defineHandlers()
 			"List of all the processes to use in the simulation.\n"
 			"{reaction, diff, spherical, advec, modifiedTM, movingSurface, "
 			"bursting, attenuation, resolution, heterogeneous, "
-			"sink, soret, constant, noSolve, SSBM}",
+			"sink, soret, constant, noSolve, SSBM, burstingReaction}",
 			JSON_ELEM_HANDLER {
 				if (tree.count(name)) {
 					auto node = tree.get_child(name);
@@ -439,7 +439,8 @@ JSONOptions::defineHandlers()
 		.add(
 			"burstingFactor", ElemType::real,
 			"This option allows the user to set the factor used in computing "
-			"the likelihood of a bursting event.",
+			"the likelihood of a bursting event (with the burstingReaction "
+			"process it is the rate prefactor f, in 1/s).",
 			JSON_ELEM_HANDLER { checkSetParam(tree, name, burstingFactor); })
 		.add(
 			"rng", ElemType::string,
