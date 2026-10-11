@@ -1,899 +1,596 @@
-#include <xolotl/factory/perf/PerfHandlerFactory.h>
-#include <xolotl/factory/viz/VizHandlerFactory.h>
-#include <xolotl/solver/handler/SolverHandler.h>
+#include <cassert>
+#include <fstream>
+#include <limits>
+
+using namespace std::string_literals;
+
+#include <xolotl/options/CommandLineError.h>
+#include <xolotl/options/ConfOptions.h>
+#include <xolotl/options/InvalidOptionValue.h>
+#include <xolotl/options/JSONOptions.h>
+#include <xolotl/options/Options.h>
+#include <xolotl/util/Filesystem.h>
+#include <xolotl/util/Log.h>
 #include <xolotl/util/MPIUtils.h>
 #include <xolotl/util/Tokenizer.h>
 
 namespace xolotl
 {
-namespace solver
+namespace options
 {
-namespace handler
-{
-SolverHandler::SolverHandler(NetworkType& _network,
-	perf::IPerfHandler& _perfHandler, const options::IOptions& options) :
-	network(_network),
-	perfHandler(_perfHandler),
-	restartFile(options.getRestartFilePath()),
-	reactionFile(options.getReactionFilePath()),
-	nX(0),
-	nY(0),
-	nZ(0),
-	hY(0.0),
-	hZ(0.0),
+Options::Options() :
+	petscArg(""),
+	checkpointFile("xolotlStop.h5"),
+	restartFile(""),
+	tempHandlerName(""),
+	tempParam{},
+	tempProfileFilename(""),
 	tempGridPower(2.5),
-	localXS(0),
-	localXM(0),
-	localYS(0),
-	localYM(0),
-	localZS(0),
-	localZM(0),
-	leftOffset(1),
-	rightOffset(1),
-	bottomOffset(1),
-	topOffset(1),
-	frontOffset(1),
-	backOffset(1),
-	electronicStoppingPower(0.0),
-	dimension(-1),
-	movingSurface(false),
-	bubbleBursting(false),
-	isMirror(true),
-	isRobin(false),
-	useAttenuation(false),
-	sameTemperatureGrid(true),
-	fluxTempProfile(false),
+	fluxFlag(false),
+	fluxAmplitude(0.0),
+	fluxTimeProfileFlag(false),
+	perfHandlerName(""),
+	perfOutputYAMLFlag(false),
+	vizHandlerName(""),
+	materialName(""),
+	initialConcentration(""),
+	interfaceLocation(-1000.0),
+	dimensionNumber(1),
+	gridTypeName(""),
+	gridParam{},
+	gridFilename(""),
+	subnetworksFlag(false),
+	initialTimeStep(0.0),
+	maxTimeStep(0.0),
+	timeStepGrowthFactor(0.0),
+	startTime(0.0),
+	endTime(0.0),
+	numTimeSteps(0),
+	gbList(""),
+	groupingMin(std::numeric_limits<int>::max()),
+	groupingWidthA(1),
+	groupingWidthB(0),
 	sputteringYield(0.0),
-	fluxHandler(nullptr),
-	temperatureHandler(nullptr),
-	vizHandler(factory::viz::VizHandlerFactory::get().generate(options)),
-	diffusionHandler(nullptr),
-	soretDiffusionHandler(nullptr),
-	tauBursting(10.0),
+	useHDF5Flag(true),
+	maxImpurity(8),
+	maxD(0),
+	maxT(0),
+	maxV(20),
+	maxPureV(20),
+	maxI(6),
+	leftBoundary(1),
+	rightBoundary(1),
+	bottomBoundary(1),
+	topBoundary(1),
+	frontBoundary(1),
+	backBoundary(1),
+	xBC("mirror"),
+	heatLossPortion(-1.0),
+	burstingDepth(10.0),
 	burstingFactor(0.1),
+	rngUseSeed(false),
 	rngSeed(0),
+	rngPrintSeed(false),
+	zeta(0.73),
+	density(10.162795276841),
+	pulseTime(0.0),
+	pulseProportion(0.0),
+	latticeParameter(-1.0),
+	impurityRadius(-1.0),
+	biasFactor(1.15),
+	hydrogenFactor(0.25),
+	xenonDiffusivity(-1.0),
+	fissionYield(0.25),
 	heVRatio(4.0),
-	previousTime(0.0),
-	nXeGB(0.0),
-	gridType(""),
-	gridFileName(""),
-	gridParam0(0.0),
-	gridParam1(0.0),
-	gridParam2(0.0),
-	gridParam3(0.0),
-	gridParam4(0.0),
-	gridParam5(0.0)
-
+	migrationThreshold(std::numeric_limits<double>::infinity()),
+	basalPortion(0.1),
+	transitionSize(325),
+	cascadeDose(-1.0),
+	cascadeEfficiency(0.0),
+	sinkStrength(0.0),
+	reactionFilePath("reaction.dat")
 {
 }
 
-SolverHandler::~SolverHandler()
+Options::~Options()
 {
 }
 
 void
-SolverHandler::generateGrid(int surfaceOffset)
+Options::printAll(std::ostream& os) const
 {
-	// Initial case
-	if (surfaceOffset == 0) {
-		// Clear the grid
-		grid.clear();
-
-		// Doesn't mean anything in 0D
-		if (dimension == 0)
-			return;
-
-		// Check if we want to read in the grid from a file
-		if (gridType == "read") {
-			// Open the corresponding file
-			std::ifstream inputFile(gridFileName.c_str());
-			if (!inputFile)
-				std::cerr << "\nCould not open the file containing the grid "
-							 "spacing information. "
-							 "Aborting!\n"
-						  << std::endl;
-			// Get the data
-			std::string line;
-			getline(inputFile, line);
-
-			// Break the line into a vector
-			auto tokens = util::Tokenizer<double>{line}();
-
-			if (tokens.size() == 0)
-				std::cerr << "\nDid not read correctly the file containing the "
-							 "grid spacing information. "
-							 "Aborting!\n"
-						  << std::endl;
-
-			// Compute the offset to add to the grid for boundary conditions
-			double offset = tokens[1] - tokens[0];
-			// Add the first grid point
-			grid.push_back(0.0);
-			// Check the location of the first grid point
-			if (tokens[0] > 0.0) {
-				grid.push_back(offset);
-			}
-
-			// Loop on the tokens
-			for (auto i = 0; i < tokens.size(); i++) {
-				grid.push_back(tokens[i] + offset);
-			}
-
-			// Add the last grid point for boundary conditions
-			grid.push_back(2.0 * tokens[tokens.size() - 1] -
-				tokens[tokens.size() - 2] + offset);
-
-			// Set the number of grid points
-			nX = grid.size() - 2;
-
-			// Get the number of dimension
-			auto dim = dimension;
-			if (dim > 1) {
-				nY = gridParam0;
-				hY = gridParam1;
-			}
-			if (dim > 2) {
-				nZ = gridParam2;
-				hZ = gridParam3;
-			}
-
-			return;
-		}
-
-		// Maybe the user wants a Chebyshev grid
-		if (gridType == "cheby") {
-			// The first grid point will be at x = 0.0
-			grid.push_back(0.0);
-			grid.push_back(0.0);
-
-			// Set the number of grid points
-			nX = gridParam0;
-			auto hx = gridParam1;
-			// In that case hx correspond to the full length of the grid
-			for (auto l = 1; l <= nX - 1; l++) {
-				grid.push_back((hx / 2.0) *
-					(1.0 - cos(core::pi * double(l) / double(nX - 1))));
-			}
-			// The last grid point will be at x = hx
-			grid.push_back(hx);
-
-			// Get the number of dimensions
-			if (dimension > 1) {
-				nY = gridParam2;
-				hY = gridParam3;
-			}
-			if (dimension > 2) {
-				nZ = gridParam4;
-				hZ = gridParam5;
-			}
-
-			return;
-		}
-		// Check if the user wants a regular grid
-		if (gridType == "uniform") {
-			// Set the number of grid points
-			nX = gridParam0;
-			auto hx = gridParam1;
-			// The grid will me made of nx + 2 points separated by hx nm
-			for (auto l = 0; l <= nX + 1; l++) {
-				grid.push_back((double)l * hx);
-			}
-
-			// Get the number of dimensions
-			if (dimension > 1) {
-				nY = gridParam2;
-				hY = gridParam3;
-			}
-			if (dimension > 2) {
-				nZ = gridParam4;
-				hZ = gridParam5;
-			}
-
-			return;
-		}
-
-		// If it is not regular do a fine mesh close to the surface and
-		// increase the step size when away from the surface
-		if (gridType == "nonuniform") {
-			// New meaning: gridParam0 is TOTAL LENGTH in nm
-			const double totalLengthNm = gridParam0;
-			// Initialize the value of the previous point
-			double previousPoint = 0.0;
-			// Set the position of the surface
-			IdType surfacePos = 0;
-			// Initialize length
-			IdType l = 0;
-
-			// Build interior nodes up to the requested total length
-			while (previousPoint < totalLengthNm) {
-				// Add the previous point
-				grid.push_back(previousPoint);
-				// Legacy dx schedule (unchanged)
-				// 0.1nm step near the surface (x < 2.5nm)
-				if (l < surfacePos + 26) {
-					previousPoint += 0.1;
-				}
-				// Then 0.25nm (2.5nm < x < 5.0nm)
-				else if (l < surfacePos + 36) {
-					previousPoint += 0.25;
-				}
-				// Then 0.5nm (5.0nm < x < 7.5nm)
-				else if (l < surfacePos + 41) {
-					previousPoint += 0.5;
-				}
-				// Then 1.0nm step size (7.5nm < x < 50.5)
-				else if (l < surfacePos + 84) {
-					previousPoint += 1.0;
-				}
-				// Then 2.0nm step size (50.5nm < x < 100.5)
-				else if (l < surfacePos + 109) {
-					previousPoint += 2.0;
-				}
-				// Then 5.0nm step size (100.5nm < x < 150.5)
-				else if (l < surfacePos + 119) {
-					previousPoint += 5.0;
-				}
-				// Then 10.0nm step size (150.5nm < x < 300.5)
-				else if (l < surfacePos + 134) {
-					previousPoint += 10.0;
-				}
-				// Then 20.0nm step size (300.5nm < x < 500.5)
-				else if (l < surfacePos + 144) {
-					previousPoint += 20.0;
-				}
-				// Then 50.0nm step size (500.5nm < x < 1000.5)
-				else if (l < surfacePos + 154) {
-					previousPoint += 50.0;
-				}
-				// Then 100.0nm step size (1000.5nm < x < 5000.5)
-				else if (l < surfacePos + 194) {
-					previousPoint += 100.0;
-				}
-				// Then 200.0nm step size (5000.5nm < x < 10000.5)
-				else if (l < surfacePos + 219) {
-					previousPoint += 200.0;
-				}
-				// Then 500.0nm step size (10000.5nm < x < 20000.5)
-				else if (l < surfacePos + 239) {
-					previousPoint += 500.0;
-				}
-				// Then 1.0um step size (20000.5nm < x < 30000.5nm )
-				else if (l < surfacePos + 249) {
-					previousPoint += 1000.0;
-				}
-				// Then 2.0um step size (30000.5nm < x < 50000.5)
-				else if (l < surfacePos + 259) {
-					previousPoint += 2000.0;
-				}
-				// Then 5.0um step size (50000.5nm < x < 100000.5)
-				else if (l < surfacePos + 269) {
-					previousPoint += 5000.0;
-				}
-				// Then 10.0um step size (100000.5nm < x < 200000.5nm )
-				else if (l < surfacePos + 279) {
-					previousPoint += 10000.0;
-				}
-				// Then 20.0um step size (200000.5nm < x < 500000.5)
-				else if (l < surfacePos + 294) {
-					previousPoint += 20000.0;
-				}
-				// Then 50.0um step size (500000.5nm < x < 1000000.5)
-				else if (l < surfacePos + 304) {
-					previousPoint += 50000.0;
-				}
-				// Then 100.0um step size (1mm < x < 2mm )
-				else if (l < surfacePos + 314) {
-					previousPoint += 100000.0;
-				}
-				// Then 200.0um step size (2mm < x < 5mm)
-				else if (l < surfacePos + 329) {
-					previousPoint += 200000.0;
-				}
-				// Then 500.0um step size (5mm < x < 10mm)
-				else if (l < surfacePos + 339) {
-					previousPoint += 500000.0;
-				}
-				// Then 1.0mm step size (10mm < x)
-				else {
-					previousPoint += 1000000.0;
-				}
-
-				++l;
-			}
-
-			// At this point, previousPoint is the first point >= totalLengthNm,
-			// but legacy grid includes that value as the next pushed point.
-
-			grid.push_back(previousPoint);
-
-			{
-				// Use surfacePos to then calculate previousPoint
-				// Use current l for the next dx step, still using legacy
-				// schedule:
-				if (l < surfacePos + 26)
-					previousPoint += 0.1;
-				else if (l < surfacePos + 36)
-					previousPoint += 0.25;
-				else if (l < surfacePos + 41)
-					previousPoint += 0.5;
-				else if (l < surfacePos + 84)
-					previousPoint += 1.0;
-				else if (l < surfacePos + 109)
-					previousPoint += 2.0;
-				else if (l < surfacePos + 119)
-					previousPoint += 5.0;
-				else if (l < surfacePos + 134)
-					previousPoint += 10.0;
-				else if (l < surfacePos + 144)
-					previousPoint += 20.0;
-				else if (l < surfacePos + 154)
-					previousPoint += 50.0;
-				else if (l < surfacePos + 194)
-					previousPoint += 100.0;
-				else if (l < surfacePos + 219)
-					previousPoint += 200.0;
-				else if (l < surfacePos + 239)
-					previousPoint += 500.0;
-				else if (l < surfacePos + 249)
-					previousPoint += 1000.0;
-				else if (l < surfacePos + 259)
-					previousPoint += 2000.0;
-				else if (l < surfacePos + 269)
-					previousPoint += 5000.0;
-				else if (l < surfacePos + 279)
-					previousPoint += 10000.0;
-				else if (l < surfacePos + 294)
-					previousPoint += 20000.0;
-				else if (l < surfacePos + 304)
-					previousPoint += 50000.0;
-				else if (l < surfacePos + 314)
-					previousPoint += 100000.0;
-				else if (l < surfacePos + 329)
-					previousPoint += 200000.0;
-				else if (l < surfacePos + 339)
-					previousPoint += 500000.0;
-				else
-					previousPoint += 1000000.0;
-
-				grid.push_back(previousPoint);
-			}
-
-			// Set nX to match the convention used elsewhere: interior =
-			// grid.size() - 2
-			nX = static_cast<IdType>(grid.size() - 2);
-
-			// Get the number of dimensions
-			if (dimension > 1) {
-				nY = gridParam1;
-				hY = gridParam2;
-			}
-			if (dimension > 2) {
-				nZ = gridParam3;
-				hZ = gridParam4;
-			}
-
-			return;
-		}
-		// If it is a geometric gradation grid
-		if (gridType == "geometric") {
-			// Initialize the value of the previous point
-			double previousPoint = 0.0;
-			// Set the number of grid points
-			nX = gridParam0;
-			// Set the gradation parameters
-			double width = 0.1, r = gridParam1;
-
-			// Loop on all the grid points
-			for (auto l = 0; l <= nX + 1; l++) {
-				// Add the previous point
-				grid.push_back(previousPoint);
-				// 0.1nm step near the surface
-				if (l < 1) {
-					previousPoint += width;
-				}
-				else {
-					previousPoint += width * pow(r, l - 1);
-				}
-			}
-
-			// Get the number of dimensions
-			if (dimension > 1) {
-				nY = gridParam2;
-				hY = gridParam3;
-			}
-			if (dimension > 2) {
-				nZ = gridParam4;
-				hZ = gridParam5;
-			}
-
-			return;
-		}
-
-		throw std::runtime_error("\nThe grid type option was not recognized!");
+	os << "checkpointFile: \"" << checkpointFile << "\"\n";
+	os << "restartFile: \"" << restartFile << "\"\n";
+	os << "tempHandlerName: \"" << tempHandlerName << "\"\n";
+	os << "tempParam: {" << tempParam[0] << ", " << tempParam[1] << "}\n";
+	os << "tempGridPower: " << tempGridPower << '\n';
+	os << "tempProfileFilename: \"" << tempProfileFilename << "\"\n";
+	os << "fluxFlag: " << std::boolalpha << fluxFlag << '\n';
+	os << "fluxAmplitude: " << fluxAmplitude << '\n';
+	os << "fluxTimeProfileFlag: " << std::boolalpha << fluxTimeProfileFlag
+	   << '\n';
+	os << "fluxTimeProfileFilePath: \"" << fluxTimeProfileFilePath << "\"\n";
+	os << "perfHandlerName: \"" << perfHandlerName << "\"\n";
+	os << "perfOutputYAMLFlag: " << std::boolalpha << perfOutputYAMLFlag
+	   << '\n';
+	os << "subnetworksFlag: " << std::boolalpha << subnetworksFlag << '\n';
+	os << "initialTimeStep: " << initialTimeStep << '\n';
+	os << "maxTimeStep: " << maxTimeStep << '\n';
+	os << "timeStepGrowthFactor: " << timeStepGrowthFactor << '\n';
+	os << "startTime: " << startTime << '\n';
+	os << "endTime: " << endTime << '\n';
+	os << "numTimeSteps: " << numTimeSteps << '\n';
+	os << "vizHandlerName: \"" << vizHandlerName << "\"\n";
+	os << "materialName: \"" << materialName << "\"\n";
+	os << "initialConcentration: \"" << initialConcentration << "\"\n";
+	os << "zeta: " << zeta << '\n';
+	os << "interfaceLocation: " << interfaceLocation << '\n';
+	os << "dimensionNumber: " << dimensionNumber << '\n';
+	os << "gridTypeName: \"" << gridTypeName << "\"\n";
+	os << "gridParam: {" << gridParam[0] << ", " << gridParam[1] << ", "
+	   << gridParam[2] << ", " << gridParam[3] << ", " << gridParam[4] << ", "
+	   << gridParam[5] << "}\n";
+	os << "gridFilename: \"" << gridFilename << "\"\n";
+	os << "gbList: \"" << gbList << "\"\n";
+	os << "groupingMin: " << groupingMin << '\n';
+	os << "groupingWidthA: " << groupingWidthA << '\n';
+	os << "groupingWidthB: " << groupingWidthB << '\n';
+	os << "sputteringYield: " << sputteringYield << '\n';
+	os << "useHDF5Flag: " << std::boolalpha << useHDF5Flag << '\n';
+	os << "networkParams:";
+	for (auto&& p : networkParams) {
+		os << ' ' << p;
 	}
-	// Modify grid
-	else {
-		// Transfer the grid
-		oldGrid = grid;
+	os << '\n';
+	os << "maxImpurity: " << maxImpurity << '\n';
+	os << "maxD: " << maxD << '\n';
+	os << "maxT: " << maxT << '\n';
+	os << "maxV: " << maxV << '\n';
+	os << "maxI: " << maxI << '\n';
+	os << "maxPureV: " << maxPureV << '\n';
 
-		// Adding grid points case
-		if (surfaceOffset > 0) {
-			// Compute the distance between what needs to be removed
-			double step = grid[surfaceOffset] - grid[0];
-			// Check the size of the two used last steps to know if we add a
-			// grid point
-			double step1 = grid[grid.size() - 2] - grid[grid.size() - 3];
-			double step2 = grid[grid.size() - 3] - grid[grid.size() - 4];
-			// Modify grid
-			if (step1 < step2 - 1.0e-4) {
-				grid[grid.size() - 2] += step;
-				// Update the last grid point for boundary conditions
-				grid[grid.size() - 1] =
-					2.0 * grid[grid.size() - 2] - grid[grid.size() - 3];
-			}
-			// Add the value at the back of the grid
-			else {
-				// Update the value of the last point
-				grid[grid.size() - 1] = grid[grid.size() - 2] + step;
-				grid.push_back(
-					2.0 * grid[grid.size() - 1] - grid[grid.size() - 2]);
-			}
+	os << "leftBoundary: " << leftBoundary << '\n';
+	os << "rightBoundary: " << rightBoundary << '\n';
+	os << "bottomBoundary: " << bottomBoundary << '\n';
+	os << "topBoundary: " << topBoundary << '\n';
+	os << "frontBoundary: " << frontBoundary << '\n';
+	os << "backBoundary: " << backBoundary << '\n';
+
+	os << "xBC: \"" << xBC << "\"\n";
+
+	os << "heatLossPortion: " << heatLossPortion << '\n';
+	os << "burstingDepth: " << burstingDepth << '\n';
+	os << "burstingFactor: " << burstingFactor << '\n';
+	os << "rngSeed: " << rngSeed << '\n';
+	os << "rngUseSeed: " << std::boolalpha << rngUseSeed << '\n';
+	os << "rngPrintSeed: " << std::boolalpha << rngPrintSeed << '\n';
+	os << "radiusMinSizes:";
+	for (auto&& s : radiusMinSizes) {
+		os << ' ' << s;
+	}
+	os << '\n';
+
+	os << "density: " << density << '\n';
+	os << "pulseTime: " << pulseTime << '\n';
+	os << "pulseProportion: " << pulseProportion << '\n';
+	os << "latticeParameter: " << latticeParameter << '\n';
+	os << "impurityRadius: " << impurityRadius << '\n';
+	os << "biasFactor: " << biasFactor << '\n';
+	os << "hydrogenFactor: " << hydrogenFactor << '\n';
+	os << "xenonDiffusivity: " << xenonDiffusivity << '\n';
+	os << "fissionYield: " << fissionYield << '\n';
+	os << "heVRatio: " << heVRatio << '\n';
+	os << "migrationThreshold: " << migrationThreshold << '\n';
+
+	os << "customFluxFilePath: \"" << customFluxFilePath.string() << "\"\n";
+
+	os << "basalPortion: " << basalPortion << '\n';
+	os << "transitionSize: " << transitionSize << '\n';
+	os << "cascadeDose: " << cascadeDose << '\n';
+	os << "cascadeEfficiency: " << cascadeEfficiency << '\n';
+
+	os << "processMap:";
+	for (auto&& p : processMap) {
+		if (p.second) {
+			os << " \"" << p.first << "\"";
 		}
-		// Removing grid points case
-		// (Work on the current grid because we want to keep the previous
-		// geometry in oldGrid)
+	}
+	os << '\n';
+
+	os << "petscArg: \"" << petscArg << "\"\n";
+}
+
+void
+Options::setNetworkParameters(const std::vector<IdType>& params)
+{
+	networkParams = params;
+
+	// Reset values
+	maxD = 0;
+	maxT = 0;
+	maxV = 20;
+	maxI = 6;
+	maxPureV = 20;
+
+	maxImpurity = params[0];
+
+	if (params.size() > 1) {
+		// Set the deuterium size
+		maxD = params[1];
+		// Set the tritium size
+		maxT = params[2];
+		// Set the vacancy size
+		maxV = params[3];
+		// Set the interstitial size
+		maxI = params[4];
+		if (params.size() > 5) {
+			// Set the pure V size
+			maxPureV = params[5];
+		}
 		else {
-			// Compute the distance between what needs to be removed
-			double step = grid[-surfaceOffset] - grid[0];
-			// Update the value of the last used grid point
-			grid[grid.size() - 2] -= step;
-			// Remove the last point if it is smaller to the second to last grid
-			// point
-			while (grid[grid.size() - 2] < grid[grid.size() - 3] + 1.0e-4) {
-				grid[grid.size() - 3] = grid[grid.size() - 2];
-				grid.pop_back();
-			}
-			// Update the last grid point for boundary conditions
-			grid[grid.size() - 1] =
-				2.0 * grid[grid.size() - 2] - grid[grid.size() - 3];
+			maxPureV = maxV;
 		}
 	}
-
-	return;
 }
 
 void
-SolverHandler::initializeHandlers(core::material::IMaterialHandler* material,
-	core::temperature::ITemperatureHandler* tempHandler,
-	const options::IOptions& opts)
+Options::setNetworkParameters(const std::string& paramStr)
 {
-	// Determine who I am.
-	int myProcId = -1;
-	auto xolotlComm = util::getMPIComm();
-	MPI_Comm_rank(xolotlComm, &myProcId);
-
-	// Initialize our random number generator.
-	bool useRNGSeedFromOptions = false;
-	std::tie(useRNGSeedFromOptions, rngSeed) = opts.getRNGSeed();
-	if (not useRNGSeedFromOptions) {
-		// User didn't give a seed value to use, so
-		// use something based on current time and our proc id
-		// so that it is different from run to run, and should
-		// be different across all processes within a given run.
-		rngSeed = time(NULL);
-	}
-	if (opts.printRNGSeed()) {
-		std::cout << "Proc " << myProcId << " using RNG seed value " << rngSeed
-				  << std::endl;
-	}
-	rng = std::make_unique<util::RandomNumberGenerator<int, unsigned int>>(
-		rngSeed + myProcId);
-
-	// Set the flux handler
-	fluxHandler = material->getFluxHandler().get();
-
-	// Set the temperature handler
-	temperatureHandler = tempHandler;
-
-	// Set the diffusion handlers
-	diffusionHandler = material->getDiffusionHandler().get();
-	soretDiffusionHandler = material->getSoretDiffusionHandler().get();
-
-	// Set the advection handlers
-	auto handlers = material->getAdvectionHandler();
-	for (auto handler : handlers) {
-		advectionHandlers.push_back(handler.get());
-	}
-
-	// Set the minimum size for the average radius computation
-	auto numSpecies = network.getSpeciesListSize();
-	minRadiusSizes = std::vector<size_t>(numSpecies, 1);
-	auto minSizes = opts.getRadiusMinSizes();
-	for (auto i = 0; i < std::min(minSizes.size(), minRadiusSizes.size());
-		i++) {
-		minRadiusSizes[i] = minSizes[i];
-	}
-
-	// Set the initial concentration
-	auto initialConcString = opts.getInitialConcentration();
-	auto tokens = util::Tokenizer<>{initialConcString}();
-	IdType count = 0;
-	while (count < tokens.size()) {
-		auto comp = std::vector<AmountType>(network.getSpeciesListSize(), 0);
-
-		// Read the cluster type
-		auto clusterSpecies = network.parseSpeciesId(tokens[count]);
-		// Get the cluster
-		comp[clusterSpecies()] = std::stoi(tokens[count + 1]);
-		//		if (tokens[count] == "Xe") {
-		//			comp[1] = 1;
-		//		}
-		auto clusterId = network.findClusterId(comp);
-		// Check that it is present in the network
-		if (clusterId == NetworkType::invalidIndex()) {
-			throw std::runtime_error("\nThe requested cluster is not present "
-									 "in the network: " +
-				tokens[count] + "_" + tokens[count + 1] +
-				", cannot use the initial concentration option!");
-		}
-		else
-			initialConc.push_back(std::make_pair<IdType, double>(
-				(IdType)clusterId, std::stod(tokens[count + 2])));
-
-		count += 3;
-	}
-
-	// Set the electronic stopping power
-	electronicStoppingPower = opts.getZeta();
-
-	// Set the number of dimension
-	dimension = opts.getDimensionNumber();
-	gridType = opts.getGridTypeName();
-	gridFileName = opts.getGridFilename();
-	gridParam0 = opts.getGridParam(0);
-	gridParam1 = opts.getGridParam(1);
-	gridParam2 = opts.getGridParam(2);
-	gridParam3 = opts.getGridParam(3);
-	gridParam4 = opts.getGridParam(4);
-	gridParam5 = opts.getGridParam(5);
-
-	// Set the sputtering yield
-	sputteringYield = opts.getSputteringYield();
-
-	// Set the sputtering yield
-	tauBursting = opts.getBurstingDepth();
-
-	// Set the bursting factor
-	burstingFactor = opts.getBurstingFactor();
-
-	// Set the HeV ratio
-	heVRatio = opts.getHeVRatio();
-
-	// Which type of temperature grid to use
-	if (opts.getTempHandlerName() == "heat" or
-		opts.getTempHandlerName() == "ELM") {
-		sameTemperatureGrid = false;
-		// The temperature grid power only makes sense in this case
-		tempGridPower = opts.getTempGridPower();
-	}
-
-	// Do we want a flux temporal profile?
-	fluxTempProfile = opts.useFluxTimeProfile();
-
-	// Boundary conditions in the X direction
-	if (opts.getBCString() == "periodic")
-		isMirror = false;
-	if (opts.getBCString() == "robin")
-		isRobin = true;
-	if (opts.getHeatLossPortion() >= 0.0)
-		isRobin = true;
-
-	// Set the boundary conditions (= 1: free surface; = 0: mirror)
-	leftOffset = opts.getLeftBoundary();
-	rightOffset = opts.getRightBoundary();
-	bottomOffset = opts.getBottomBoundary();
-	topOffset = opts.getTopBoundary();
-	frontOffset = opts.getFrontBoundary();
-	backOffset = opts.getBackBoundary();
-
-	// Should we be able to move the surface?
-	auto map = opts.getProcesses();
-	movingSurface = map["movingSurface"];
-	// Should we be able to burst bubbles?
-	bubbleBursting = map["bursting"];
-	// Should we be able to attenuate the modified trap mutation?
-	useAttenuation = map["attenuation"];
-
-	// Some safeguards about what to use with what
-	if (leftOffset == 0 &&
-		(map["advec"] || map["modifiedTM"] || map["movingSurface"] ||
-			map["bursting"])) {
-		throw std::runtime_error(
-			"\nThe left side of the grid is set to use a reflective "
-			"boundary condition but you want to use processes that are "
-			"intrinsically related to a free surface (advection, modified "
-			"trap mutation, moving surface, bubble bursting).");
-	}
-
-	// Complains if processes that should not be used together are used
-	if (map["attenuation"] && !map["modifiedTM"]) {
-		throw std::runtime_error(
-			"\nYou want to use the attenuation on the modified trap "
-			"mutation but you are not using the modifiedTM process, it "
-			"doesn't make any sense.");
-	}
-	if (map["modifiedTM"] && !map["reaction"]) {
-		throw std::runtime_error(
-			"\nYou want to use the modified trap mutation but the reaction "
-			"process is not set, it doesn't make any sense.");
-	}
-
-	return;
+	setNetworkParameters(util::Tokenizer<IdType>{paramStr}());
 }
 
 void
-SolverHandler::generateTemperatureGrid()
+Options::addProcess(const std::string& processKey)
 {
-	// Don't do anything if we want the same grid as the cluster one
-	if (sameTemperatureGrid) {
-		temperatureGrid = grid;
-		return;
+	// Initialize map if necessary
+	if (processMap.empty()) {
+		setProcesses("");
 	}
 
-	// If the temperature grid already existed we need to save its values
-	std::vector<double> oldGrid;
-	if (temperatureGrid.size() > 0)
-		oldGrid = temperatureGrid;
-	// Clear the grid
-	temperatureGrid.clear();
-
-	// Doesn't mean anything in 0D
-	if (grid.size() == 0)
-		return;
-
-	// Compute the total width
-	auto n = grid.size() - 2;
-	auto width =
-		((grid[grid.size() - 3] + grid[grid.size() - 2]) / 2.0 - grid[1]);
-
-	auto newWidth = width;
-	auto newH = pow(newWidth, 1 / tempGridPower) / (n - 1.5);
-
-	// Surface
-	temperatureGrid.push_back(0);
-	temperatureGrid.push_back(pow(newH, tempGridPower));
-
-	// Material
-	for (auto i = 2; i < grid.size(); i++) {
-		auto j = i - 1;
-		temperatureGrid.push_back(
-			temperatureGrid[1] + (pow(j * newH, tempGridPower)));
-	}
-
-	// The temperature values need to be updated to match the new grid
-	if (oldGrid.size() == 0)
-		return;
-
-	// Get the default temperature vector if needed
-	auto localTemp = temperature;
-	// First, broadcast the temperature vector so that each
-	// rank can access any temperature on the grid.
-	auto xolotlComm = util::getMPIComm();
-	int procId;
-	MPI_Comm_rank(xolotlComm, &procId);
-	int worldSize;
-	MPI_Comm_size(xolotlComm, &worldSize);
-
-	// Need to create an array of size worldSize where each entry
-	// is the number of element on the given procId
-	int toSend = localXM;
-	// Ghost cells
-	if (localXS == 0 || localXS + localXM == nX)
-		toSend++;
-	if (localXS == 0 && localXS + localXM == nX)
-		toSend++;
-
-	// Receiving array for number of elements
-	int counts[worldSize];
-	MPI_Allgather(&toSend, 1, MPI_INT, counts, 1, MPI_INT, xolotlComm);
-
-	// Define the displacements
-	int displacements[worldSize];
-	for (auto i = 0; i < worldSize; i++) {
-		if (i == 0)
-			displacements[i] = 0;
-		else
-			displacements[i] = displacements[i - 1] + counts[i - 1];
-	}
-
-	// Receiving array for temperatures
-	double broadcastedTemp[nX + 2];
-	double valuesToSend[toSend];
-	if (localXS == 0) {
-		for (auto i = 0; i < toSend; i++) {
-			valuesToSend[i] = localTemp[i];
-		}
+	// Look for the key
+	if (auto it = processMap.find(processKey); it != processMap.end()) {
+		// Switch the value to true in the map
+		processMap[processKey] = true;
 	}
 	else {
-		for (auto i = 0; i < toSend; i++) {
-			valuesToSend[i] = localTemp[i + 1];
-		}
+		throw InvalidOptionValue(
+			"Options: The process name is not known: " + processKey);
 	}
-	MPI_Allgatherv(&valuesToSend, toSend, MPI_DOUBLE, &broadcastedTemp, counts,
-		displacements, MPI_DOUBLE, xolotlComm);
-
-	// Now we can interpolate the temperature for the local grid
-	std::vector<double> toReturn;
-	// Loop on the local grid including ghosts
-	for (auto i = localXS; i < localXS + localXM + 2; i++) {
-		// Left of surface
-		if (i < 0) {
-			toReturn.push_back(broadcastedTemp[nX]);
-			continue;
-		}
-		// Get the grid location
-		double loc = 0.0;
-		if (i == 0)
-			loc = temperatureGrid[0] - temperatureGrid[1];
-		else
-			loc = (temperatureGrid[i - 1] + temperatureGrid[i]) / 2.0 -
-				temperatureGrid[1];
-
-		bool matched = false;
-		// Look for it in the temperature grid
-		for (auto j = 0; j < nX + 1; j++) {
-			double tempLoc1 = 0.0,
-				   tempLoc2 = (oldGrid[j] + oldGrid[j + 1]) / 2.0 - oldGrid[1];
-			if (j == 0)
-				tempLoc1 = oldGrid[0] - oldGrid[1];
-			else
-				tempLoc1 = (oldGrid[j - 1] + oldGrid[j]) / 2.0 - oldGrid[1];
-
-			if (loc >= tempLoc1 && loc < tempLoc2) {
-				double xLoc = (loc - tempLoc1) / (tempLoc2 - tempLoc1);
-				double y1 = broadcastedTemp[j], y2 = broadcastedTemp[j + 1];
-				toReturn.push_back(y1 + xLoc * (y2 - y1));
-				matched = true;
-				break;
-			}
-		}
-
-		if (not matched)
-			toReturn.push_back(broadcastedTemp[nX]);
-	}
-
-	temperature = toReturn;
 }
 
 void
-SolverHandler::createLocalNE(IdType a, IdType b, IdType c)
+Options::setTempParam(const std::vector<double>& params)
 {
-	localNE.clear();
-	// Create the vector of vectors and fill it with 0.0
-	for (auto i = 0; i < a; i++) {
-		auto& tempTempVector = localNE.emplace_back();
-		for (auto j = 0; j < b; j++) {
-			auto& tempVector = tempTempVector.emplace_back();
-			for (auto k = 0; k < c; k++) {
-				tempVector.push_back({0.0, 0.0, 0.0, 0.0});
-			}
-		}
+	if (params.size() > 2) {
+		throw InvalidOptionValue(
+			"Options: too many temperature parameters (expect 2 or less)");
 	}
-}
-
-bool
-SolverHandler::checkForRestart() const
-{
-	return (not restartFile.empty()) and fs::exists(restartFile);
+	for (std::size_t i = 0; i < params.size(); ++i) {
+		tempParam[i] = params[i];
+	}
 }
 
 void
-SolverHandler::setGBLocation(IdType i, IdType j, IdType k)
+Options::setTempParam(const std::string& paramStr)
 {
-	// Add the coordinates to the GB vector
-	if (i >= localXS && i < localXS + std::max(localXM, (IdType)1) &&
-		j >= localYS && j < localYS + std::max(localYM, (IdType)1) &&
-		k >= localZS && k < localZS + std::max(localZM, (IdType)1)) {
-		gbVector.push_back({i, j, k});
+	auto tokens = util::Tokenizer<double>{paramStr}();
+	setTempParam(tokens);
+}
+
+void
+Options::checkTempProfileFilename() const
+{
+	// Check that the profile file exists
+	std::ifstream inFile(tempProfileFilename);
+	if (!inFile) {
+		throw std::runtime_error("Options: could not open file containing "
+								 "temperature profile data. Aborting!");
 	}
 }
 
-std::vector<double>
-SolverHandler::interpolateTemperature(std::vector<double> localTemp)
+void
+Options::checkFluxTimeProfileFilename() const
 {
-	// No need to interpolate if the grid are the same
-	if (sameTemperatureGrid)
-		return temperature;
-
-	// Get the default temperature vector if needed
-	if (localTemp.size() == 0)
-		localTemp = temperature;
-	// First, broadcast the temperature vector so that each
-	// rank can access any temperature on the grid.
-	auto xolotlComm = util::getMPIComm();
-	int procId;
-	MPI_Comm_rank(xolotlComm, &procId);
-	int worldSize;
-	MPI_Comm_size(xolotlComm, &worldSize);
-
-	// Need to create an array of size worldSize where each entry
-	// is the number of element on the given procId
-	int toSend = localXM;
-	// Ghost cells
-	if (localXS == 0 || localXS + localXM == nX)
-		toSend++;
-	if (localXS == 0 && localXS + localXM == nX)
-		toSend++;
-
-	// Receiving array for number of elements
-	int counts[worldSize];
-	MPI_Allgather(&toSend, 1, MPI_INT, counts, 1, MPI_INT, xolotlComm);
-
-	// Define the displacements
-	int displacements[worldSize];
-	for (auto i = 0; i < worldSize; i++) {
-		if (i == 0)
-			displacements[i] = 0;
-		else
-			displacements[i] = displacements[i - 1] + counts[i - 1];
+	// Check that the profile file exists
+	std::ifstream inFile(fluxTimeProfileFilePath.c_str());
+	if (!inFile) {
+		throw std::runtime_error("Options: could not open file containing flux "
+								 "profile data. Aborting!");
 	}
-
-	// Receiving array for temperatures
-	double broadcastedTemp[nX + 2];
-	double valuesToSend[toSend];
-	if (localXS == 0) {
-		for (auto i = 0; i < toSend; i++) {
-			valuesToSend[i] = localTemp[i];
-		}
-	}
-	else {
-		for (auto i = 0; i < toSend; i++) {
-			valuesToSend[i] = localTemp[i + 1];
-		}
-	}
-	MPI_Allgatherv(&valuesToSend, toSend, MPI_DOUBLE, &broadcastedTemp, counts,
-		displacements, MPI_DOUBLE, xolotlComm);
-
-	// Now we can interpolate the temperature for the local grid
-	std::vector<double> toReturn;
-	// Loop on the local grid including ghosts
-	for (auto i = localXS; i < localXS + localXM + 2; i++) {
-		// Get the grid location
-		double loc = 0.0;
-		if (i == 0)
-			loc = grid[0] - grid[1];
-		else
-			loc = (grid[i - 1] + grid[i]) / 2.0 - grid[1];
-
-		bool matched = false;
-		// Look for it in the temperature grid
-		for (auto j = 0; j < nX + 1; j++) {
-			double tempLoc1 = 0.0,
-				   tempLoc2 =
-					   (temperatureGrid[j] + temperatureGrid[j + 1]) / 2.0 -
-				temperatureGrid[1];
-			if (j == 0)
-				tempLoc1 = temperatureGrid[0] - temperatureGrid[1];
-			else
-				tempLoc1 = (temperatureGrid[j - 1] + temperatureGrid[j]) / 2.0 -
-					temperatureGrid[1];
-
-			if (loc >= tempLoc1 && loc < tempLoc2) {
-				double xLoc = (loc - tempLoc1) / (tempLoc2 - tempLoc1);
-				double y1 = broadcastedTemp[j], y2 = broadcastedTemp[j + 1];
-				toReturn.push_back(y1 + xLoc * (y2 - y1));
-				matched = true;
-				break;
-			}
-		}
-
-		if (not matched) {
-			toReturn.push_back(broadcastedTemp[nX + 1]);
-		}
-	}
-
-	return toReturn;
 }
-} // namespace handler
-} // namespace solver
-} // namespace xolotl
+
+void
+Options::checkPerfHandlerName() const
+{
+	static const std::string perfHandlers[] = {"dummy", "os", "papi"};
+	if (std::find(begin(perfHandlers), end(perfHandlers), perfHandlerName) ==
+		end(perfHandlers)) {
+		throw InvalidOptionValue(
+			"Options: could not understand the performance handler type: " +
+			perfHandlerName + ". Aborting!");
+	}
+}
+
+void
+Options::checkVizHandlerName() const
+{
+	// Determine the type of handlers we are being asked to use
+	if (!(vizHandlerName == "std" || vizHandlerName == "dummy")) {
+		throw InvalidOptionValue(
+			"Options: unrecognized argument in the visualization option "
+			"handler: " +
+			vizHandlerName + ". Aborting!");
+	}
+}
+
+void
+Options::setGridParam(const std::vector<double>& params)
+{
+	if (params.size() > 6) {
+		throw InvalidOptionValue(
+			"Options: too many grid parameters (expect 6 or less)");
+	}
+	for (std::size_t i = 0; i < params.size(); ++i) {
+		gridParam[i] = params[i];
+	}
+}
+
+void
+Options::setGridParam(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<double>{paramStr}();
+	setGridParam(tokens);
+}
+
+void
+Options::checkGridFilename() const
+{
+	// Check that the file exists
+	std::ifstream inFile(gridFilename);
+	if (!inFile) {
+		throw std::runtime_error(
+			"Options: could not open file containing grid data. Aborting!");
+	}
+}
+
+void
+Options::setRadiusMinSizes(const std::vector<int>& params)
+{
+	for (int i = 0; i < params.size(); i++) {
+		radiusMinSizes.push_back(params[i]);
+	}
+}
+
+void
+Options::setRadiusMinSizes(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<int>{paramStr}();
+	setRadiusMinSizes(tokens);
+}
+
+void
+Options::setBoundaries(const std::vector<int>& params)
+{
+	if (params.size() < 2) {
+		// TODO: should this be an error?
+		return;
+	}
+
+	// Set the left boundary
+	leftBoundary = params[0];
+	// Set the right boundary
+	rightBoundary = params[1];
+	if (params.size() > 2)
+		// Set the bottom boundary
+		bottomBoundary = params[2];
+	if (params.size() > 3)
+		// Set the top boundary
+		topBoundary = params[3];
+	if (params.size() > 4)
+		// Set the front boundary
+		frontBoundary = params[4];
+	if (params.size() > 5)
+		// Set the back boundary
+		backBoundary = params[5];
+}
+
+void
+Options::setBoundaries(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<int>{paramStr}();
+	setBoundaries(tokens);
+}
+
+void
+Options::processRNGParam(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<>{paramStr}();
+	size_t currIdx = 0;
+
+	// Determine whether we should print the seed value.
+	bool shouldPrintSeed = false;
+	if (tokens[currIdx] == "print") {
+		shouldPrintSeed = true;
+		++currIdx;
+	}
+	rngPrintSeed = shouldPrintSeed;
+
+	if (currIdx < tokens.size()) {
+		// Convert arg to an integer.
+		char* ep = NULL;
+		auto useed = strtoul(tokens[currIdx].c_str(), &ep, 10);
+		if (ep != (tokens[currIdx].c_str() + tokens[currIdx].length())) {
+			throw InvalidOptionValue(
+				"Options: Invalid random number generator seed, must "
+				"be a non-negative integer. Aborting!");
+		}
+		setRNGSeed(useed);
+	}
+}
+
+void
+Options::setProcesses(const std::vector<std::string>& processList)
+{
+	for (auto&& processName : processList) {
+		addProcess(processName);
+	}
+}
+
+void
+Options::setProcesses(const std::string& processList)
+{
+	// Initialize the map of processes
+	processMap["reaction"] = false;
+	processMap["diff"] = false;
+	processMap["spherical"] = false;
+	processMap["advec"] = false;
+	processMap["modifiedTM"] = false;
+	processMap["movingSurface"] = false;
+	processMap["bursting"] = false;
+	processMap["attenuation"] = false;
+	processMap["resolution"] = false;
+	processMap["heterogeneous"] = false;
+	processMap["sink"] = false;
+	processMap["soret"] = false;
+	processMap["constant"] = false;
+	processMap["noSolve"] = false;
+	processMap["SSBM"] = false;
+	processMap["burstingReaction"] = false;
+
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<>{processList}();
+	setProcesses(tokens);
+}
+
+void
+Options::setCouplingTimeStepParams(const std::vector<double>& params)
+{
+	if (params.size() != 6) {
+		throw InvalidOptionValue(
+			"Options: Must provide six (6) values for time step "
+			"parameters. Aborting!");
+	}
+
+	initialTimeStep = params[0];
+	maxTimeStep = params[1];
+	timeStepGrowthFactor = params[2];
+	if (params[3] > 0.0) {
+		throw InvalidOptionValue("Options: unsupported value for startTime; "
+								 "should be 0.0 (or negative for restart).");
+	}
+	startTime = params[3];
+	endTime = params[4];
+	if (params[5] <= 0) {
+		throw InvalidOptionValue(
+			"Options: maxSteps must be a positive value. Aborting!");
+	}
+	numTimeSteps = static_cast<IdType>(params[5]);
+}
+
+void
+Options::setCouplingTimeStepParams(const std::string& paramString)
+{
+	// Set parameters from tokenized list
+	auto params = util::Tokenizer<double>{paramString}();
+	setCouplingTimeStepParams(params);
+}
+
+void
+Options::setPulseParams(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<double>{paramStr}();
+
+	pulseTime = tokens[0];
+	pulseProportion = tokens[1];
+}
+
+void
+Options::setGroupingParams(const std::vector<int>& params)
+{
+	// Set grouping minimum size
+	groupingMin = params[0];
+	// Set the grouping width in the first direction
+	groupingWidthA = params[1];
+	// Set the grouping width in the second direction
+	if (params.size() > 2) {
+		groupingWidthB = params[2];
+	}
+}
+
+void
+Options::setGroupingParams(const std::string& paramString)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<int>{paramString}();
+	setGroupingParams(tokens);
+}
+
+void
+Options::appendPetscArg(const std::string& arg)
+{
+	if (!petscArg.empty()) {
+		petscArg += " ";
+	}
+	petscArg += arg;
+}
+
+void
+printUsage(std::ostream& os)
+{
+	os << "Xolotl Usage:\n"
+	   << "\n"
+	   << "    xolotl --help|-h\n"
+	   << "    xolotl <param-file>\n";
+}
+
+void
+printHelp()
+{
+	printUsage(std::cout);
+	std::cout << "\n"
+			  << "\n"
+			  << "Command-line arguments:\n"
+			  << "\n"
+			  << "  --help|-h     Print this help message.\n"
+			  << "  <param-file>  File providing runtime parameters.\n"
+			  << "\n"
+			  << "\n"
+			  << "Xolotl (JSON) parameters:\n"
+			  << "\n";
+	JSONOptions{}.printHelp(std::cout);
+}
+
+std::shared_ptr<IOptions>
+createOptions(int argc, const char* argv[])
+{
+	// Handle empty command-line
+	if (argc < 2) {
+		std::stringstream usage;
+		printUsage(usage);
+		throw CommandLineError(usage.str());
+	}
+
+	// Handle help output
+	auto arg1 = std::string(argv[1]);
+	if (arg1 == "--help" || arg1 == "-h") {
+		printHelp();
+		return std::shared_ptr<IOptions>();
+	}
+
+	// Handle parameter file
+	auto filePath = fs::path(argv[1]);
+	auto ext = filePath.extension();
+
+	if (ext == ".json") {
+		return std::make_shared<JSONOptions>();
+	}
+
+	return std::make_shared<ConfOptions>();
+}
+} // end namespace options
+} // end namespace xolotl
