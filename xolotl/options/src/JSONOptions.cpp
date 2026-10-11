@@ -1,604 +1,596 @@
+#include <cassert>
 #include <fstream>
-
-#define BOOST_BIND_GLOBAL_PLACEHOLDERS
-#include <boost/algorithm/string/predicate.hpp>
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
-
-#include <xolotl/options/InvalidOptionValue.h>
-#include <xolotl/options/JSONOptions.h>
-#include <xolotl/options/detail/JSONElem.h>
-#include <xolotl/util/Log.h>
-#include <xolotl/util/MPIUtils.h>
+#include <limits>
 
 using namespace std::string_literals;
+
+#include <xolotl/options/CommandLineError.h>
+#include <xolotl/options/ConfOptions.h>
+#include <xolotl/options/InvalidOptionValue.h>
+#include <xolotl/options/JSONOptions.h>
+#include <xolotl/options/Options.h>
+#include <xolotl/util/Filesystem.h>
+#include <xolotl/util/Log.h>
+#include <xolotl/util/MPIUtils.h>
+#include <xolotl/util/Tokenizer.h>
 
 namespace xolotl
 {
 namespace options
 {
-std::stringstream
-stripComments(std::ifstream& ifs)
+Options::Options() :
+	petscArg(""),
+	checkpointFile("xolotlStop.h5"),
+	restartFile(""),
+	tempHandlerName(""),
+	tempParam{},
+	tempProfileFilename(""),
+	tempGridPower(2.5),
+	fluxFlag(false),
+	fluxAmplitude(0.0),
+	fluxTimeProfileFlag(false),
+	perfHandlerName(""),
+	perfOutputYAMLFlag(false),
+	vizHandlerName(""),
+	materialName(""),
+	initialConcentration(""),
+	interfaceLocation(-1000.0),
+	dimensionNumber(1),
+	gridTypeName(""),
+	gridParam{},
+	gridFilename(""),
+	subnetworksFlag(false),
+	initialTimeStep(0.0),
+	maxTimeStep(0.0),
+	timeStepGrowthFactor(0.0),
+	startTime(0.0),
+	endTime(0.0),
+	numTimeSteps(0),
+	gbList(""),
+	groupingMin(std::numeric_limits<int>::max()),
+	groupingWidthA(1),
+	groupingWidthB(0),
+	sputteringYield(0.0),
+	useHDF5Flag(true),
+	maxImpurity(8),
+	maxD(0),
+	maxT(0),
+	maxV(20),
+	maxPureV(20),
+	maxI(6),
+	leftBoundary(1),
+	rightBoundary(1),
+	bottomBoundary(1),
+	topBoundary(1),
+	frontBoundary(1),
+	backBoundary(1),
+	xBC("mirror"),
+	heatLossPortion(-1.0),
+	burstingDepth(10.0),
+	burstingFactor(0.1),
+	rngUseSeed(false),
+	rngSeed(0),
+	rngPrintSeed(false),
+	zeta(0.73),
+	density(10.162795276841),
+	pulseTime(0.0),
+	pulseProportion(0.0),
+	latticeParameter(-1.0),
+	impurityRadius(-1.0),
+	biasFactor(1.15),
+	hydrogenFactor(0.25),
+	xenonDiffusivity(-1.0),
+	fissionYield(0.25),
+	heVRatio(4.0),
+	migrationThreshold(std::numeric_limits<double>::infinity()),
+	basalPortion(0.1),
+	transitionSize(325),
+	cascadeDose(-1.0),
+	cascadeEfficiency(0.0),
+	sinkStrength(0.0),
+	reactionFilePath("reaction.dat")
 {
-	std::stringstream ss;
-	std::string line;
-	bool cCommenting = false;
-	while (std::getline(ifs, line)) {
-		for (auto it = begin(line); it != end(line); ++it) {
-			if (cCommenting) {
-				if (*it == '*' && next(it) != end(line) && *next(it) == '/') {
-					cCommenting = false;
-					++it;
-				}
-				continue;
-			}
-			if (*it == '#') {
-				break;
-			}
-			if (*it == '/') {
-				if (next(it) != end(line) && *next(it) == '/') {
-					break;
-				}
-				if (next(it) != end(line) && *next(it) == '*') {
-					cCommenting = true;
-					++it;
-					continue;
-				}
-			}
-			ss << *it;
-		}
-	}
-	return ss;
 }
 
-template <typename TParam>
-inline bool
-checkSetParam(const boost::property_tree::iptree& tree,
-	const std::string& label, TParam& param)
+Options::~Options()
 {
-	auto wrap = tree.get_optional<TParam>(label);
-	if (wrap) {
-		param = wrap.get();
-		return true;
-	}
-	return false;
-}
-
-template <typename T>
-inline std::vector<T>
-asVector(const boost::property_tree::iptree& node)
-{
-	std::vector<T> ret;
-	for (auto&& item : node) {
-		ret.push_back(item.second.get_value<T>());
-	}
-	return ret;
-}
-
-JSONOptions::JSONOptions() :
-	_map(std::make_unique<boost::property_tree::iptree>())
-{
-}
-
-JSONOptions::JSONOptions(const JSONOptions& other) :
-	Options(other),
-	_map(std::make_unique<boost::property_tree::iptree>(*other._map))
-{
-}
-
-JSONOptions::~JSONOptions()
-{
-}
-
-std::shared_ptr<IOptions>
-JSONOptions::makeCopy() const
-{
-	return std::make_shared<JSONOptions>(*this);
 }
 
 void
-JSONOptions::setCouplingTimeStepParamsFromGroup(
-	const boost::property_tree::iptree& node)
+Options::printAll(std::ostream& os) const
 {
-	checkSetParam(node, "initialDt", initialTimeStep);
-	checkSetParam(node, "maxDt", maxTimeStep);
-	checkSetParam(node, "growthFactor", timeStepGrowthFactor);
-	checkSetParam(node, "startTime", startTime);
-	if (startTime > 0.0) {
+	os << "checkpointFile: \"" << checkpointFile << "\"\n";
+	os << "restartFile: \"" << restartFile << "\"\n";
+	os << "tempHandlerName: \"" << tempHandlerName << "\"\n";
+	os << "tempParam: {" << tempParam[0] << ", " << tempParam[1] << "}\n";
+	os << "tempGridPower: " << tempGridPower << '\n';
+	os << "tempProfileFilename: \"" << tempProfileFilename << "\"\n";
+	os << "fluxFlag: " << std::boolalpha << fluxFlag << '\n';
+	os << "fluxAmplitude: " << fluxAmplitude << '\n';
+	os << "fluxTimeProfileFlag: " << std::boolalpha << fluxTimeProfileFlag
+	   << '\n';
+	os << "fluxTimeProfileFilePath: \"" << fluxTimeProfileFilePath << "\"\n";
+	os << "perfHandlerName: \"" << perfHandlerName << "\"\n";
+	os << "perfOutputYAMLFlag: " << std::boolalpha << perfOutputYAMLFlag
+	   << '\n';
+	os << "subnetworksFlag: " << std::boolalpha << subnetworksFlag << '\n';
+	os << "initialTimeStep: " << initialTimeStep << '\n';
+	os << "maxTimeStep: " << maxTimeStep << '\n';
+	os << "timeStepGrowthFactor: " << timeStepGrowthFactor << '\n';
+	os << "startTime: " << startTime << '\n';
+	os << "endTime: " << endTime << '\n';
+	os << "numTimeSteps: " << numTimeSteps << '\n';
+	os << "vizHandlerName: \"" << vizHandlerName << "\"\n";
+	os << "materialName: \"" << materialName << "\"\n";
+	os << "initialConcentration: \"" << initialConcentration << "\"\n";
+	os << "zeta: " << zeta << '\n';
+	os << "interfaceLocation: " << interfaceLocation << '\n';
+	os << "dimensionNumber: " << dimensionNumber << '\n';
+	os << "gridTypeName: \"" << gridTypeName << "\"\n";
+	os << "gridParam: {" << gridParam[0] << ", " << gridParam[1] << ", "
+	   << gridParam[2] << ", " << gridParam[3] << ", " << gridParam[4] << ", "
+	   << gridParam[5] << "}\n";
+	os << "gridFilename: \"" << gridFilename << "\"\n";
+	os << "gbList: \"" << gbList << "\"\n";
+	os << "groupingMin: " << groupingMin << '\n';
+	os << "groupingWidthA: " << groupingWidthA << '\n';
+	os << "groupingWidthB: " << groupingWidthB << '\n';
+	os << "sputteringYield: " << sputteringYield << '\n';
+	os << "useHDF5Flag: " << std::boolalpha << useHDF5Flag << '\n';
+	os << "networkParams:";
+	for (auto&& p : networkParams) {
+		os << ' ' << p;
+	}
+	os << '\n';
+	os << "maxImpurity: " << maxImpurity << '\n';
+	os << "maxD: " << maxD << '\n';
+	os << "maxT: " << maxT << '\n';
+	os << "maxV: " << maxV << '\n';
+	os << "maxI: " << maxI << '\n';
+	os << "maxPureV: " << maxPureV << '\n';
+
+	os << "leftBoundary: " << leftBoundary << '\n';
+	os << "rightBoundary: " << rightBoundary << '\n';
+	os << "bottomBoundary: " << bottomBoundary << '\n';
+	os << "topBoundary: " << topBoundary << '\n';
+	os << "frontBoundary: " << frontBoundary << '\n';
+	os << "backBoundary: " << backBoundary << '\n';
+
+	os << "xBC: \"" << xBC << "\"\n";
+
+	os << "heatLossPortion: " << heatLossPortion << '\n';
+	os << "burstingDepth: " << burstingDepth << '\n';
+	os << "burstingFactor: " << burstingFactor << '\n';
+	os << "rngSeed: " << rngSeed << '\n';
+	os << "rngUseSeed: " << std::boolalpha << rngUseSeed << '\n';
+	os << "rngPrintSeed: " << std::boolalpha << rngPrintSeed << '\n';
+	os << "radiusMinSizes:";
+	for (auto&& s : radiusMinSizes) {
+		os << ' ' << s;
+	}
+	os << '\n';
+
+	os << "density: " << density << '\n';
+	os << "pulseTime: " << pulseTime << '\n';
+	os << "pulseProportion: " << pulseProportion << '\n';
+	os << "latticeParameter: " << latticeParameter << '\n';
+	os << "impurityRadius: " << impurityRadius << '\n';
+	os << "biasFactor: " << biasFactor << '\n';
+	os << "hydrogenFactor: " << hydrogenFactor << '\n';
+	os << "xenonDiffusivity: " << xenonDiffusivity << '\n';
+	os << "fissionYield: " << fissionYield << '\n';
+	os << "heVRatio: " << heVRatio << '\n';
+	os << "migrationThreshold: " << migrationThreshold << '\n';
+
+	os << "customFluxFilePath: \"" << customFluxFilePath.string() << "\"\n";
+
+	os << "basalPortion: " << basalPortion << '\n';
+	os << "transitionSize: " << transitionSize << '\n';
+	os << "cascadeDose: " << cascadeDose << '\n';
+	os << "cascadeEfficiency: " << cascadeEfficiency << '\n';
+
+	os << "processMap:";
+	for (auto&& p : processMap) {
+		if (p.second) {
+			os << " \"" << p.first << "\"";
+		}
+	}
+	os << '\n';
+
+	os << "petscArg: \"" << petscArg << "\"\n";
+}
+
+void
+Options::setNetworkParameters(const std::vector<IdType>& params)
+{
+	networkParams = params;
+
+	// Reset values
+	maxD = 0;
+	maxT = 0;
+	maxV = 20;
+	maxI = 6;
+	maxPureV = 20;
+
+	maxImpurity = params[0];
+
+	if (params.size() > 1) {
+		// Set the deuterium size
+		maxD = params[1];
+		// Set the tritium size
+		maxT = params[2];
+		// Set the vacancy size
+		maxV = params[3];
+		// Set the interstitial size
+		maxI = params[4];
+		if (params.size() > 5) {
+			// Set the pure V size
+			maxPureV = params[5];
+		}
+		else {
+			maxPureV = maxV;
+		}
+	}
+}
+
+void
+Options::setNetworkParameters(const std::string& paramStr)
+{
+	setNetworkParameters(util::Tokenizer<IdType>{paramStr}());
+}
+
+void
+Options::addProcess(const std::string& processKey)
+{
+	// Initialize map if necessary
+	if (processMap.empty()) {
+		setProcesses("");
+	}
+
+	// Look for the key
+	if (auto it = processMap.find(processKey); it != processMap.end()) {
+		// Switch the value to true in the map
+		processMap[processKey] = true;
+	}
+	else {
+		throw InvalidOptionValue(
+			"Options: The process name is not known: " + processKey);
+	}
+}
+
+void
+Options::setTempParam(const std::vector<double>& params)
+{
+	if (params.size() > 2) {
+		throw InvalidOptionValue(
+			"Options: too many temperature parameters (expect 2 or less)");
+	}
+	for (std::size_t i = 0; i < params.size(); ++i) {
+		tempParam[i] = params[i];
+	}
+}
+
+void
+Options::setTempParam(const std::string& paramStr)
+{
+	auto tokens = util::Tokenizer<double>{paramStr}();
+	setTempParam(tokens);
+}
+
+void
+Options::checkTempProfileFilename() const
+{
+	// Check that the profile file exists
+	std::ifstream inFile(tempProfileFilename);
+	if (!inFile) {
+		throw std::runtime_error("Options: could not open file containing "
+								 "temperature profile data. Aborting!");
+	}
+}
+
+void
+Options::checkFluxTimeProfileFilename() const
+{
+	// Check that the profile file exists
+	std::ifstream inFile(fluxTimeProfileFilePath.c_str());
+	if (!inFile) {
+		throw std::runtime_error("Options: could not open file containing flux "
+								 "profile data. Aborting!");
+	}
+}
+
+void
+Options::checkPerfHandlerName() const
+{
+	static const std::string perfHandlers[] = {"dummy", "os", "papi"};
+	if (std::find(begin(perfHandlers), end(perfHandlers), perfHandlerName) ==
+		end(perfHandlers)) {
+		throw InvalidOptionValue(
+			"Options: could not understand the performance handler type: " +
+			perfHandlerName + ". Aborting!");
+	}
+}
+
+void
+Options::checkVizHandlerName() const
+{
+	// Determine the type of handlers we are being asked to use
+	if (!(vizHandlerName == "std" || vizHandlerName == "dummy")) {
+		throw InvalidOptionValue(
+			"Options: unrecognized argument in the visualization option "
+			"handler: " +
+			vizHandlerName + ". Aborting!");
+	}
+}
+
+void
+Options::setGridParam(const std::vector<double>& params)
+{
+	if (params.size() > 6) {
+		throw InvalidOptionValue(
+			"Options: too many grid parameters (expect 6 or less)");
+	}
+	for (std::size_t i = 0; i < params.size(); ++i) {
+		gridParam[i] = params[i];
+	}
+}
+
+void
+Options::setGridParam(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<double>{paramStr}();
+	setGridParam(tokens);
+}
+
+void
+Options::checkGridFilename() const
+{
+	// Check that the file exists
+	std::ifstream inFile(gridFilename);
+	if (!inFile) {
+		throw std::runtime_error(
+			"Options: could not open file containing grid data. Aborting!");
+	}
+}
+
+void
+Options::setRadiusMinSizes(const std::vector<int>& params)
+{
+	for (int i = 0; i < params.size(); i++) {
+		radiusMinSizes.push_back(params[i]);
+	}
+}
+
+void
+Options::setRadiusMinSizes(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<int>{paramStr}();
+	setRadiusMinSizes(tokens);
+}
+
+void
+Options::setBoundaries(const std::vector<int>& params)
+{
+	if (params.size() < 2) {
+		// TODO: should this be an error?
+		return;
+	}
+
+	// Set the left boundary
+	leftBoundary = params[0];
+	// Set the right boundary
+	rightBoundary = params[1];
+	if (params.size() > 2)
+		// Set the bottom boundary
+		bottomBoundary = params[2];
+	if (params.size() > 3)
+		// Set the top boundary
+		topBoundary = params[3];
+	if (params.size() > 4)
+		// Set the front boundary
+		frontBoundary = params[4];
+	if (params.size() > 5)
+		// Set the back boundary
+		backBoundary = params[5];
+}
+
+void
+Options::setBoundaries(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<int>{paramStr}();
+	setBoundaries(tokens);
+}
+
+void
+Options::processRNGParam(const std::string& paramStr)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<>{paramStr}();
+	size_t currIdx = 0;
+
+	// Determine whether we should print the seed value.
+	bool shouldPrintSeed = false;
+	if (tokens[currIdx] == "print") {
+		shouldPrintSeed = true;
+		++currIdx;
+	}
+	rngPrintSeed = shouldPrintSeed;
+
+	if (currIdx < tokens.size()) {
+		// Convert arg to an integer.
+		char* ep = NULL;
+		auto useed = strtoul(tokens[currIdx].c_str(), &ep, 10);
+		if (ep != (tokens[currIdx].c_str() + tokens[currIdx].length())) {
+			throw InvalidOptionValue(
+				"Options: Invalid random number generator seed, must "
+				"be a non-negative integer. Aborting!");
+		}
+		setRNGSeed(useed);
+	}
+}
+
+void
+Options::setProcesses(const std::vector<std::string>& processList)
+{
+	for (auto&& processName : processList) {
+		addProcess(processName);
+	}
+}
+
+void
+Options::setProcesses(const std::string& processList)
+{
+	// Initialize the map of processes
+	processMap["reaction"] = false;
+	processMap["diff"] = false;
+	processMap["spherical"] = false;
+	processMap["advec"] = false;
+	processMap["modifiedTM"] = false;
+	processMap["movingSurface"] = false;
+	processMap["bursting"] = false;
+	processMap["attenuation"] = false;
+	processMap["resolution"] = false;
+	processMap["heterogeneous"] = false;
+	processMap["sink"] = false;
+	processMap["soret"] = false;
+	processMap["constant"] = false;
+	processMap["noSolve"] = false;
+	processMap["SSBM"] = false;
+	processMap["burstingReaction"] = false;
+
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<>{processList}();
+	setProcesses(tokens);
+}
+
+void
+Options::setCouplingTimeStepParams(const std::vector<double>& params)
+{
+	if (params.size() != 6) {
+		throw InvalidOptionValue(
+			"Options: Must provide six (6) values for time step "
+			"parameters. Aborting!");
+	}
+
+	initialTimeStep = params[0];
+	maxTimeStep = params[1];
+	timeStepGrowthFactor = params[2];
+	if (params[3] > 0.0) {
 		throw InvalidOptionValue("Options: unsupported value for startTime; "
 								 "should be 0.0 (or negative for restart).");
 	}
-	checkSetParam(node, "endTime", endTime);
-	checkSetParam(node, "maxSteps", numTimeSteps);
-	if (numTimeSteps <= 0) {
+	startTime = params[3];
+	endTime = params[4];
+	if (params[5] <= 0) {
 		throw InvalidOptionValue(
 			"Options: maxSteps must be a positive value. Aborting!");
 	}
-}
-
-detail::JSONElemVector
-JSONOptions::defineHandlers()
-{
-#define JSON_ELEM_HANDLER [this, &tree](const std::string& name)
-
-	using ElemType = detail::JSONElem::Type;
-
-	auto& tree = *_map;
-
-	detail::JSONElemVector handlers;
-
-	handlers
-		.add(
-			"logLevel", ElemType::string,
-			"Logging output threshold.\n"
-			"{debug,extra,info,warning,error}\n"
-			"(default = info)",
-			JSON_ELEM_HANDLER {
-				util::Log::setLevelThreshold(tree.get(name, "info"));
-			})
-		.add(
-			"restartFile", ElemType::string,
-			"The HDF5 file to use for restart.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, restartFile); })
-		.add(
-			"tempHandler", ElemType::string,
-			"Temperature handler to use.\n"
-			"{constant,gradient,heat,ELM,profile}\n"
-			"(default = constant)",
-			JSON_ELEM_HANDLER { tempHandlerName = tree.get(name, "constant"); })
-		.add(
-			"tempParam", ElemType::list_real,
-			"At most two parameters for temperature handler.\n"
-			"Alternatives:\n"
-			"constant -> temp;\n"
-			"gradient -> surfaceTemp bulkTemp;\n"
-			"heat -> heatFlux bulkTemp;\n"
-			"ELM -> bulkTemp",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setTempParam(node.get_value<std::string>());
-					}
-					else {
-						setTempParam(asVector<double>(node));
-					}
-				}
-			})
-		.add(
-			"tempFile", ElemType::string,
-			"A temperature profile is given by the specified file, "
-			"then linear interpolation is used to fit the data.\n"
-			"NOTE: no need for tempParam here.",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					tempProfileFilename = tree.get<std::string>(name);
-					checkTempProfileFilename();
-				}
-			})
-		.add(
-			"tempGridPower", ElemType::real,
-			"The value of the power to use to create the temperature grid "
-			"spacing, only used if heat temperature handler is used.\n"
-			"(default = 2.5)",
-			JSON_ELEM_HANDLER {
-				checkSetParam(tree, "tempGridPower", tempGridPower);
-			})
-		.add(
-			"flux", ElemType::real,
-			"The value of the incoming flux in #/nm2/s.\n"
-			"If the Fuel case is used it actually corresponds to the fission "
-			"rate in #/nm3/s.",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					fluxFlag = true;
-					fluxAmplitude = tree.get<double>(name);
-				}
-			})
-		.add(
-			"fluxFile", ElemType::string,
-			"A time profile for the flux is given by the specified file, "
-			"then linear interpolation is used to fit the data.\n"
-			"NOTE: If a flux profile file is given, "
-			"a constant flux should NOT be given",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					fluxTimeProfileFilePath = tree.get<std::string>(name);
-					checkFluxTimeProfileFilename();
-					fluxTimeProfileFlag = true;
-				}
-			})
-		.add(
-			"perfHandler", ElemType::string,
-			"Which set of performance handlers to use.\n"
-			"{dummy,os,papi}\n"
-			"(default = os)",
-			JSON_ELEM_HANDLER {
-				perfHandlerName = tree.get(name, "os");
-				checkPerfHandlerName();
-			})
-		.add(
-			"perfOutputYAML", ElemType::boolean,
-			"Should we write the performance report to a YAML file?",
-			JSON_ELEM_HANDLER {
-				checkSetParam(tree, name, perfOutputYAMLFlag);
-			})
-		.add(
-			"vizHandler", ElemType::string,
-			"Which set of handlers to use for the visualization.\n"
-			"{std,dummy}\n"
-			"(default = dummy)",
-			JSON_ELEM_HANDLER {
-				vizHandlerName = tree.get(name, "dummy");
-				checkVizHandlerName();
-			})
-		.add(
-			"dimensions", ElemType::integer,
-			"Number of dimensions for the simulation.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, dimensionNumber); })
-		.add(
-			"material", ElemType::string,
-			"Label for material being used.\n"
-			"{W100, W110, W111, W211, Pulsed, Fuel, Fe, 800H, AlphaZr}",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, materialName); })
-		.add(
-			"initialConc", ElemType::string,
-			"The name, size, and value of the initial concentration in the "
-			"material.",
-			JSON_ELEM_HANDLER {
-				checkSetParam(tree, name, initialConcentration);
-			})
-		.add(
-			"zeta", ElemType::real,
-			"The value of the electronic stopping power in the material.\n"
-			"(default = 0.73)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, "zeta", zeta); })
-		.add(
-			"interfaceLoc", ElemType::real,
-			"The value (in nm) of the interface location between two "
-			"materials.\n"
-			"(default = -1000.0)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, interfaceLocation); })
-		.add(
-			"gridType", ElemType::string,
-			"Grid type to use along X.\n"
-			"{uniform,nonuniform,geometric,cheby,read}\n"
-			"(default = uniform)",
-			JSON_ELEM_HANDLER { gridTypeName = tree.get(name, "uniform"); })
-		.add(
-			"gridParam", ElemType::list_real,
-			"At most six parameters for the grid.\n"
-			"Alternatives:\n"
-			"uniform -> nX hX;\n"
-			"nonuniform -> nX;\n"
-			"geometric -> nX ratio\n"
-			"cheby -> nX width\n"
-			"The four additional parameters are for a uniform grid in Y and Z\n"
-			"-> nY hY nZ hZ.",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setGridParam(node.get_value<std::string>());
-					}
-					else {
-						setGridParam(asVector<double>(node));
-					}
-				}
-			})
-		.add(
-			"gridFile", ElemType::string,
-			"A grid spacing is given by the specified file.\n"
-			"NOTE: you need gridParam here only if in 2D/3D.",
-			JSON_ELEM_HANDLER {
-				if (checkSetParam(tree, name, gridFilename)) {
-					checkGridFilename();
-				}
-			})
-		.add(
-			"process", ElemType::list_string,
-			"List of all the processes to use in the simulation.\n"
-			"{reaction, diff, spherical, advec, modifiedTM, movingSurface, "
-			"bursting, attenuation, resolution, heterogeneous, "
-			"sink, soret, constant, noSolve, SSBM, burstingReaction}",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setProcesses(node.get_value<std::string>());
-					}
-					else {
-						setProcesses(asVector<std::string>(node));
-					}
-				}
-			})
-		.add(
-			"grain", ElemType::string,
-			"This option allows the user to add GB in the X, Y, or Z "
-			"directions. To do so, simply write the direction followed "
-			"by the distance in nm.\n"
-			"For instance: X 3.0 Z 2.5 Z 10.0",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, gbList); })
-		.add(
-			"useSubnetworks", ElemType::boolean,
-			"Should we distribute network across subnetworks?",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, subnetworksFlag); })
-		.add(
-			"couplingTimeStepParams", ElemType::list_real,
-			"This option allows the user to define the parameters that control "
-			"the multi-instance time-stepping. "
-			"To do so, simply write the values in order:\n"
-			"initialDt maxDt growthFactor startTime endTime maxSteps",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setCouplingTimeStepParams(
-							node.get_value<std::string>());
-					}
-					else {
-						if (node.count("maxDt")) {
-							setCouplingTimeStepParamsFromGroup(node);
-						}
-						else {
-							setCouplingTimeStepParams(asVector<double>(node));
-						}
-					}
-				}
-			})
-		.add(
-			"grouping", ElemType::list_integer,
-			"The grouping parameters: the first integer is the size at which "
-			"the grouping starts (HeV clusters in the PSI case, Xe in the NE "
-			"case), the second is the first width of the groups (He for PSI, "
-			"Xe for NE), and the third one in the second width of the groups "
-			"(V for PSI).",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setGroupingParams(node.get_value<std::string>());
-					}
-					else {
-						setGroupingParams(asVector<int>(node));
-					}
-				}
-			})
-		.add(
-			"sputtering", ElemType::real,
-			"The sputtering yield (in atoms/ion) that will be used.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, sputteringYield); })
-		.add(
-			"netParam", ElemType::list_integer,
-			"This option allows the user to define the boundaries of the "
-			"network. To do so, simply write the values in order:\n"
-			"maxHe/Xe/Basal maxD maxT maxV maxI maxPureV",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					// Set the flag to not use the HDF5 file
-					useHDF5Flag = false;
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setNetworkParameters(node.get_value<std::string>());
-					}
-					else {
-						setNetworkParameters(asVector<IdType>(node));
-					}
-				}
-			})
-		.add(
-			"radiusSize", ElemType::list_integer,
-			"This option allows the user to set a minimum size for the "
-			"computation for the average radii, in the same order as the "
-			"netParam option (default is 0).",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setRadiusMinSizes(node.get_value<std::string>());
-					}
-					else {
-						setRadiusMinSizes(asVector<int>(node));
-					}
-				}
-			})
-		.add(
-			"boundary", ElemType::list_integer,
-			"This option allows the user to choose the boundary conditions. "
-			"The first one corresponds to the left side (surface) and the "
-			"second one to the right (bulk), then two for Y and two for Z.\n"
-			"0 means mirror or periodic, 1 means free surface.",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					auto node = tree.get_child(name);
-					if (node.empty()) {
-						setBoundaries(node.get_value<std::string>());
-					}
-					else {
-						setBoundaries(asVector<int>(node));
-					}
-				}
-			})
-		.add(
-			"xBCType", ElemType::string,
-			"The boundary conditions to use in the X direction.\n"
-			"{mirror,periodic,robin (for temperature)}\n"
-			"(default = mirror)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, xBC); })
-		.add(
-			"heatLossPortion", ElemType::real,
-			"The portion of heat lost in the bulk.\n"
-			"(default = -1.0)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, heatLossPortion); })
-		.add(
-			"burstingDepth", ElemType::real,
-			"The depth (in nm) after which there is an exponential decrease in "
-			"the probability of bursting.\n"
-			"(default = 10.0)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, burstingDepth); })
-		.add(
-			"burstingFactor", ElemType::real,
-			"This option allows the user to set the factor used in computing "
-			"the likelihood of a bursting event (with the burstingReaction "
-			"process it is the rate prefactor f, in 1/s).",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, burstingFactor); })
-		.add(
-			"rng", ElemType::string,
-			"Allows user to specify seed used to initialize random number "
-			"generator (default = determined from current time) and "
-			"whether each process should print the seed value "
-			"it uses (default = don't print).",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					processRNGParam(tree.get<std::string>(name));
-				}
-			})
-		.add(
-			"density", ElemType::real,
-			"Sets a density in nm-3 for the number of xenon per volume in a "
-			"bubble for the NE case.\n"
-			"(default = 10.162795276841)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, density); })
-		.add(
-			"pulse", ElemType::string,
-			"The total length of the pulse (in s) if the Pulsed material is "
-			"used, and the proportion of it that is ON.",
-			JSON_ELEM_HANDLER {
-				if (tree.count(name)) {
-					setPulseParams(tree.get<std::string>(name));
-				}
-			})
-		.add(
-			"lattice", ElemType::real, "The length of the lattice side in nm.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, latticeParameter); })
-		.add(
-			"impurityRadius", ElemType::real,
-			"The radius of the main impurity (He or Xe) in nm.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, impurityRadius); })
-		.add(
-			"biasFactor", ElemType::real,
-			"This option allows the user to set the bias factor reflecting the "
-			"fact that interstitial clusters have a larger surrounding strain "
-			"field.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, biasFactor); })
-		.add(
-			"hydrogenFactor", ElemType::real,
-			"The factor between the size of He and H.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, hydrogenFactor); })
-		.add(
-			"xenonDiffusivity", ElemType::real,
-			"The diffusion coefficient for xenon in nm2 s-1.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, xenonDiffusivity); })
-		.add(
-			"fissionYield", ElemType::real,
-			"The number of xenon created for each fission.\n"
-			"(default = 0.25)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, fissionYield); })
-		.add(
-			"heVRatio", ElemType::real,
-			"The number of He atoms allowed per V in a bubble.",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, heVRatio); })
-		.add(
-			"migrationThreshold", ElemType::real,
-			"Set a limit on the migration energy above which the diffusion "
-			"will be ignored.",
-			JSON_ELEM_HANDLER {
-				checkSetParam(tree, name, migrationThreshold);
-			})
-		.add(
-			"customFluxFilePath", ElemType::string,
-			"The path to the custom flux profile file; the default is an empty "
-			"string that will use the default material associated flux "
-			"handler.",
-			JSON_ELEM_HANDLER {
-				checkSetParam(tree, name, customFluxFilePath);
-			})
-		.add(
-			"reactionFilePath", ElemType::string,
-			"The path to the reaction rates file.\n"
-			"(default = \"reaction.dat\")",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, reactionFilePath); })
-		.add(
-			"basalPortion", ElemType::real,
-			"The value of the basal portion generated for each V.\n"
-			"(default = 0.1)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, basalPortion); })
-		.add(
-			"transitionSize", ElemType::integer,
-			"The value for the transition within a type of cluster, for "
-			"instance basal.\n"
-			"(default = 325)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, transitionSize); })
-		.add(
-			"cascadeDose", ElemType::real,
-			"The value of the dose at which the cascade overlap effect takes "
-			"effect, if negative there won't be an effect.\n"
-			"(default = -1.0)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, cascadeDose); })
-		.add(
-			"cascadeEfficiency", ElemType::real,
-			"The value of the remaining efficiency once the overlap effect "
-			"started.\n"
-			"(default = 0.0)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, cascadeEfficiency); })
-		.add(
-			"sinkStrength", ElemType::real,
-			"The value of the sink strength in nm-2.\n"
-			"(default = 0.0)",
-			JSON_ELEM_HANDLER { checkSetParam(tree, name, sinkStrength); })
-		.add(
-			"petscArgs", ElemType::list_string,
-			"List of strings to be joined verbatim and passed to PETSc.",
-			JSON_ELEM_HANDLER {
-				if (tree.count("petscArgs")) {
-					for (auto&& elem : tree.get_child("petscArgs")) {
-						appendPetscArg(elem.second.data());
-					}
-				}
-			});
-
-	return handlers;
-
-#undef JSON_ELEM_HANDLER
+	numTimeSteps = static_cast<IdType>(params[5]);
 }
 
 void
-JSONOptions::printHelp(std::ostream& os)
+Options::setCouplingTimeStepParams(const std::string& paramString)
 {
-	defineHandlers().print(std::cout);
-	std::cout
-		<< "NOTE: a LIST parameter may be specified either as a JSON list\n"
-		   "      or as a space separated string list.\n\n";
+	// Set parameters from tokenized list
+	auto params = util::Tokenizer<double>{paramString}();
+	setCouplingTimeStepParams(params);
 }
 
 void
-JSONOptions::readParams(int argc, const char* argv[])
+Options::setPulseParams(const std::string& paramStr)
 {
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<double>{paramStr}();
+
+	pulseTime = tokens[0];
+	pulseProportion = tokens[1];
+}
+
+void
+Options::setGroupingParams(const std::vector<int>& params)
+{
+	// Set grouping minimum size
+	groupingMin = params[0];
+	// Set the grouping width in the first direction
+	groupingWidthA = params[1];
+	// Set the grouping width in the second direction
+	if (params.size() > 2) {
+		groupingWidthB = params[2];
+	}
+}
+
+void
+Options::setGroupingParams(const std::string& paramString)
+{
+	// Break the argument into tokens.
+	auto tokens = util::Tokenizer<int>{paramString}();
+	setGroupingParams(tokens);
+}
+
+void
+Options::appendPetscArg(const std::string& arg)
+{
+	if (!petscArg.empty()) {
+		petscArg += " ";
+	}
+	petscArg += arg;
+}
+
+void
+printUsage(std::ostream& os)
+{
+	os << "Xolotl Usage:\n"
+	   << "\n"
+	   << "    xolotl --help|-h\n"
+	   << "    xolotl <param-file>\n";
+}
+
+void
+printHelp()
+{
+	printUsage(std::cout);
+	std::cout << "\n"
+			  << "\n"
+			  << "Command-line arguments:\n"
+			  << "\n"
+			  << "  --help|-h     Print this help message.\n"
+			  << "  <param-file>  File providing runtime parameters.\n"
+			  << "\n"
+			  << "\n"
+			  << "Xolotl (JSON) parameters:\n"
+			  << "\n";
+	JSONOptions{}.printHelp(std::cout);
+}
+
+std::shared_ptr<IOptions>
+createOptions(int argc, const char* argv[])
+{
+	// Handle empty command-line
 	if (argc < 2) {
-		throw std::runtime_error(
-			"Options: parameter file name must not be empty");
+		std::stringstream usage;
+		printUsage(usage);
+		throw CommandLineError(usage.str());
 	}
 
-	std::ifstream ifs(argv[1]);
-	if (!ifs) {
-		throw std::runtime_error("Unable to open file: "s + argv[1]);
+	// Handle help output
+	auto arg1 = std::string(argv[1]);
+	if (arg1 == "--help" || arg1 == "-h") {
+		printHelp();
+		return std::shared_ptr<IOptions>();
 	}
 
-	auto ss = stripComments(ifs);
-	boost::property_tree::read_json(ss, *_map);
+	// Handle parameter file
+	auto filePath = fs::path(argv[1]);
+	auto ext = filePath.extension();
 
-	auto handlers = defineHandlers();
-
-	// Checking the option names first
-	auto& tree = *_map;
-	for (const auto& leaf : tree) {
-		if (!handlers.checkName(leaf.first)) {
-			throw InvalidOptionValue(
-				"Options: unsupported option: " + leaf.first);
-		}
+	if (ext == ".json") {
+		return std::make_shared<JSONOptions>();
 	}
 
-	handlers.processParams();
+	return std::make_shared<ConfOptions>();
 }
-} // namespace options
-} // namespace xolotl
+} // end namespace options
+} // end namespace xolotl
