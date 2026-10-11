@@ -150,10 +150,7 @@ PSIReactionNetwork<TSpeciesEnum>::initializeExtraDOFs(
 		this->getCluster(largestClusterId, plsm::HostMemSpace{}).getRegion();
 	Composition comp = clReg.getUpperLimitPoint();
 
-	// The SSBM carries exactly three DOFs: C_b, ONE gas moment, one V moment.
-	// There is no separate He moment slot, so if the network resolves both a
-	// He axis and a hydrogen axis with real extent, the two gas contents would
-	// be summed into hAvId() and every sigmoid consuming <gas> would be wrong.
+	// The SSBM carries exactly three DOFs: C_b, one gas moment, one V moment.
 	//
 	//
 	{
@@ -177,8 +174,7 @@ PSIReactionNetwork<TSpeciesEnum>::initializeExtraDOFs(
 
 	this->_clusterData.h_view().setMaxVSize(comp[Species::V] - 1);
 	// maxHSize is the maximum size along the gas axis, i.e. whichever species
-	// occupies the single shared gas moment slot. The guard above has already
-	// established that exactly one gas axis has extent, so pick that one.
+	// occupies the single shared gas moment slot. 
 	//
 	// Upstream used
 	// `if constexpr (hasDeuterium)`, which leaves maxHSize seeded from an
@@ -221,34 +217,8 @@ PSIReactionNetwork<TSpeciesEnum>::computeFluxesPreProcess(
 		selectTrapMutationReactions(surfaceDepth, spacing);
 	}
 
-	// SSBM
-	if (this->_enableSSBM) {
-		auto clusterDataMirror = this->getClusterDataMirror();
-
-		// Get the concentrations on the host
-		auto dConcs = Kokkos::subview(concentrations,
-			std::make_pair(clusterDataMirror.bubbleId(),
-				clusterDataMirror.bubbleId() + 2));
-		auto hConcs = create_mirror_view(dConcs);
-		deep_copy(hConcs, dConcs);
-
-		// Compute the average composition for V
-
-		auto conc = hConcs(0);
-		auto avComp = hConcs(1) / conc;
-		if (conc == 0.0)
-			avComp = 0.0;
-		// Compute and save the radius from that
-		this->_clusterData.h_view().setBubbleAvRad(util::max(0.0,
-			computeBubbleRadius(avComp, clusterDataMirror.latticeParameter())));
-
-		// Set the depth for bursting
-		this->_clusterData.h_view().setDepth(surfaceDepth);
-
-		// Set the largest rate
-		auto largestRate = this->getLargestRate();
-		this->_clusterData.h_view().setFBursting(largestRate);
-	}
+	// SSBM radius and bursting depth
+	updateSSBMAndBurstingData(concentrations, surfaceDepth);
 }
 
 template <typename TSpeciesEnum>
@@ -263,34 +233,51 @@ PSIReactionNetwork<TSpeciesEnum>::computePartialsPreProcess(
 		selectTrapMutationReactions(surfaceDepth, spacing);
 	}
 
-	// SSBM
-	if (this->_enableSSBM) {
-		auto clusterDataMirror = this->getClusterDataMirror();
+	// SSBM radius and bursting depth
+	updateSSBMAndBurstingData(concentrations, surfaceDepth);
+}
 
-		// Get the concentrations on the host
-		auto dConcs = Kokkos::subview(concentrations,
-			std::make_pair(clusterDataMirror.bubbleId(),
-				clusterDataMirror.bubbleId() + 2));
-		auto hConcs = create_mirror_view(dConcs);
-		deep_copy(hConcs, dConcs);
-
-		// Compute the average composition for V
-
-		auto conc = hConcs(0);
-		auto avComp = hConcs(1) / conc;
-		if (conc == 0.0)
-			avComp = 0.0;
-		// Compute and save the radius from that
-		this->_clusterData.h_view().setBubbleAvRad(util::max(0.0,
-			computeBubbleRadius(avComp, clusterDataMirror.latticeParameter())));
-
-		// Set the depth for bursting
+template <typename TSpeciesEnum>
+void
+PSIReactionNetwork<TSpeciesEnum>::updateSSBMAndBurstingData(
+	ConcentrationsView concentrations, double surfaceDepth)
+{
+	// Depth of the current grid point, used by the bursting rates
+	if (this->_enableSSBM or this->_enableBurstingReaction) {
 		this->_clusterData.h_view().setDepth(surfaceDepth);
-
-		// Set the largest rate
-		auto largestRate = this->getLargestRate();
-		this->_clusterData.h_view().setFBursting(largestRate);
 	}
+
+	if (not this->_enableSSBM)
+		return;
+
+	auto clusterDataMirror = this->getClusterDataMirror();
+	auto bId = clusterDataMirror.bubbleId();
+	auto vId = clusterDataMirror.voidAvId();
+
+	// Get the SSBM DOFs on the host: [C_b, ..., <V>C_b]. The subview range is
+	// half-open, so it has to go up to vId + 1 to include the V moment.
+	// (Before, it stopped at bubbleId + 2 and read slot 1, which is the gas
+	// moment since the H/V order was swapped in 5f4bd3b1, so r_B was computed
+	// from <He> instead of <V>.)
+	auto dConcs =
+		Kokkos::subview(concentrations, std::make_pair(bId, vId + 1));
+	auto hConcs = create_mirror_view(dConcs);
+	deep_copy(hConcs, dConcs);
+
+	// Compute the average vacancy content <V> = (<V>C_b) / C_b. Same guard as
+	// the SSBM reactions: where there is (almost) no bubble, C_b can be tiny
+	// while <V>C_b is not, and the ratio blows the radius up. The bursting
+	// flux k_B <He>C_b has no C_b factor to compensate for it.
+	auto conc = hConcs(0);
+	double avV = 0.0;
+	if (conc > 1.0e-16)
+		avV = hConcs(vId - bId) / conc;
+	if (not(avV > 0.0))
+		avV = 0.0;
+
+	// Compute and save the radius from that
+	this->_clusterData.h_view().setBubbleAvRad(util::max(
+		0.0, computeBubbleRadius(avV, clusterDataMirror.latticeParameter())));
 }
 
 template <typename TSpeciesEnum>
@@ -567,6 +554,12 @@ void
 PSIReactionGenerator<TSpeciesEnum>::operator()(
 	IndexType i, IndexType j, TTag tag) const
 {
+	// He bubble bursting as a reaction. Bubbles are immobile, so this has to
+	// be registered before the diffusion check below returns early.
+	if (i == j and this->_clusterData.enableBurstingReaction()) {
+		addBurstings(i, tag);
+	}
+
 	// Check the diffusion factors
 	auto diffusionFactor = this->_clusterData.diffusionFactor;
 	if (diffusionFactor(i) == 0.0 && diffusionFactor(j) == 0.0) {
@@ -952,10 +945,7 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 		if (not clReg.isSimplex())
 			return;
 
-		// Bursting, add it once
-		if (i == 0) {
-			// this->addTransformReaction(tag, {bubbleId, bubbleId});
-		}
+		// Bursting of the single size bubble is registered in addBurstings()
 
 		// V case
 		if (lo.isOnAxis(Species::V)) {
@@ -1001,9 +991,7 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 		// NOTE: no He dissociation channel (B -> B + He_1) is registered here,
 		// unlike the H case above. He binding to vacancies in W is strong and
 		// thermal re-emission is slow at PFC temperatures, so this is a
-		// deliberate modeling assumption rather than an omission -- but it
-		// should be stated explicitly in any write-up, and revisited if the
-		// bubble needs a way to shed gas other than bursting.
+		// deliberate modeling assumption rather than an omission
 		if (lo.isOnAxis(Species::He)) {
 			auto& subpaving = this->getSubpaving();
 			Composition comp = Composition::zero();
@@ -1071,6 +1059,56 @@ PSIReactionGenerator<TSpeciesEnum>::addSingleSizeReactions(
 			auto vId = lo1[Species::I] > 0 ? j : i;
 			// TODO: this is not implemented in PSIReaction
 			// this->addProductionReaction(tag, {iId, bubbleId, vId});
+		}
+	}
+}
+
+template <typename TSpeciesEnum>
+template <typename TTag>
+KOKKOS_INLINE_FUNCTION
+void
+PSIReactionGenerator<TSpeciesEnum>::addBurstings(IndexType i, TTag tag) const
+{
+	using Species = typename NetworkType::Species;
+	using Composition = typename NetworkType::Composition;
+
+	// Single size bubble: B -> B, only its He content decreases. 
+	if (i == 0 and this->_clusterData.enableSSBM()) {
+		IndexType bubbleId = this->_clusterData.bubbleId();
+		this->addTransformReaction(tag, {bubbleId, bubbleId});
+	}
+
+	const auto& clReg = this->getCluster(i).getRegion();
+	Composition lo = clReg.getOrigin();
+	Composition hi = clReg.getUpperLimitPoint();
+
+	// Only He-V bubbles burst: need He and V
+	if (hi[Species::He] == 1 or hi[Species::V] == 1)
+		return;
+	// He only: leave out clusters containing hydrogen isotopes
+	if constexpr (psi::hasDeuterium<Species>) {
+		if (hi[Species::D] > 1)
+			return;
+	}
+	if constexpr (psi::hasTritium<Species>) {
+		if (hi[Species::T] > 1)
+			return;
+	}
+
+	// He_iV_j -> V_j: the He leaves through the surface and the empty V
+	// cluster stays. For a grouped cluster, one reaction per V cluster
+	// covered by the group's V range.
+	auto& subpaving = this->getSubpaving();
+	auto previousIndex = NetworkType::invalidIndex();
+	for (auto nV = util::max(lo[Species::V], (AmountType)1);
+		 nV < hi[Species::V]; nV++) {
+		Composition comp = Composition::zero();
+		comp[Species::V] = nV;
+		auto vClusterId = subpaving.findTileId(comp);
+		if (vClusterId != NetworkType::invalidIndex() and
+			vClusterId != previousIndex) {
+			this->addTransformReaction(tag, {i, vClusterId});
+			previousIndex = vClusterId;
 		}
 	}
 }
