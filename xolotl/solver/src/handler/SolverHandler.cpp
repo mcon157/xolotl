@@ -610,7 +610,7 @@ SolverHandler::initializeHandlers(core::material::IMaterialHandler* material,
 	// Some safeguards about what to use with what
 	if (leftOffset == 0 &&
 		(map["advec"] || map["modifiedTM"] || map["movingSurface"] ||
-			map["bursting"])) {
+			map["bursting"] || map["burstingReaction"])) {
 		throw std::runtime_error(
 			"\nThe left side of the grid is set to use a reflective "
 			"boundary condition but you want to use processes that are "
@@ -619,6 +619,12 @@ SolverHandler::initializeHandlers(core::material::IMaterialHandler* material,
 	}
 
 	// Complains if processes that should not be used together are used
+	if (map["bursting"] && map["burstingReaction"]) {
+		throw std::runtime_error(
+			"\nYou want to use both the stochastic bubble bursting (bursting) "
+			"and the bursting as a reaction (burstingReaction), please pick "
+			"one.");
+	}
 	if (map["attenuation"] && !map["modifiedTM"]) {
 		throw std::runtime_error(
 			"\nYou want to use the attenuation on the modified trap "
