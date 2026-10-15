@@ -439,8 +439,14 @@ JSONOptions::defineHandlers()
 		.add(
 			"burstingFactor", ElemType::real,
 			"This option allows the user to set the factor used in computing "
-			"the likelihood of a bursting event (with the burstingReaction "
-			"process it is the rate prefactor f, in 1/s).",
+			"the likelihood of a bursting event.\n"
+			"bursting (stochastic): dimensionless, the probability per time "
+			"step is flux * dt * f * (r/d) * min(1, exp(-(d - tau)/(2 tau))) "
+			"(Blondel et al., Nucl. Fusion 58 (2018) 126034: f = 0.1).\n"
+			"burstingReaction: the rate prefactor f' in 1/s, "
+			"k_B = f' (r/d) min(1, exp(-(d - tau)/(2 tau))) (Lasa et al., "
+			"J. Nucl. Mater. 594 (2024) 155011: f' = 2e8 at 5e9 He/nm2/s).\n"
+			"(default = 0.1, which is only meaningful for bursting)",
 			JSON_ELEM_HANDLER { checkSetParam(tree, name, burstingFactor); })
 		.add(
 			"rng", ElemType::string,
