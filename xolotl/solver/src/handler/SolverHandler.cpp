@@ -1,6 +1,7 @@
 #include <xolotl/factory/perf/PerfHandlerFactory.h>
 #include <xolotl/factory/viz/VizHandlerFactory.h>
 #include <xolotl/solver/handler/SolverHandler.h>
+#include <xolotl/util/Log.h>
 #include <xolotl/util/MPIUtils.h>
 #include <xolotl/util/Tokenizer.h>
 
@@ -624,6 +625,24 @@ SolverHandler::initializeHandlers(core::material::IMaterialHandler* material,
 			"\nYou want to use both the stochastic bubble bursting (bursting) "
 			"and the bursting as a reaction (burstingReaction), please pick "
 			"one.");
+	}
+	// burstingFactor means two different things: a dimensionless probability
+	// factor for the stochastic "bursting" process (default 0.1), and the
+	// rate prefactor f' in 1/s for "burstingReaction" (Lasa et al., J. Nucl.
+	// Mater. 594 (2024) 155011: f' = 2e8 1/s reproduces the large scale MD
+	// retention at 5e9 He/nm2/s, 933 K). Keeping the stochastic default with
+	// the reaction form gives k_B ~ 0.1 r/d 1/s, i.e. no bursting at all,
+	// without any message. Warn when the value looks like the stochastic one.
+	if (map["burstingReaction"] && burstingFactor < 1.0e3) {
+		XOLOTL_LOG_WARN
+			<< "SolverHandler: burstingReaction uses burstingFactor = "
+			<< burstingFactor
+			<< " as the rate prefactor f' in 1/s; this is too small for "
+			   "any bursting to happen during a simulation. Did you mean "
+			   "the stochastic value? For reference, f' = 2e8 1/s matched "
+			   "MD at a flux of 5e9 He/nm2/s (Lasa et al. 2024), i.e. "
+			   "f'/flux = 0.04 nm2; flux here = "
+			<< opts.getFluxAmplitude() << " /nm2/s.";
 	}
 	if (map["attenuation"] && !map["modifiedTM"]) {
 		throw std::runtime_error(
